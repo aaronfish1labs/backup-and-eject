@@ -97,6 +97,11 @@ The app does not send data anywhere. Its only saved settings are the selected
 destination name and ID, the AI-app warning preference, launch-at-login state,
 and the date of the last successful backup for each selected disk.
 
+## Support
+
+If Backup & Eject saves you time or gives you peace of mind, you can
+[buy me a coffee](https://buymeacoffee.com/aaronfish1labs).
+
 ## License and trademarks
 
 Released under the [MIT License](LICENSE).
