@@ -5,6 +5,8 @@ enum AppConfiguration {
     static let bundleIdentifier = "com.aaronfish1labs.backupandeject"
     static let waitForDiskTimeout: TimeInterval = 120
     static let waitForUnmountTimeout: TimeInterval = 20
+    static let waitForIdleTimeout: TimeInterval = 180
+    static let quickCommandTimeout: TimeInterval = 30
 
     static let tmutilPath = "/usr/bin/tmutil"
     static let diskutilPath = "/usr/sbin/diskutil"
@@ -24,6 +26,8 @@ enum AppConfiguration {
             targetDestinationID: selection.id,
             waitForDiskTimeout: waitForDiskTimeout,
             waitForUnmountTimeout: waitForUnmountTimeout,
+            waitForIdleTimeout: waitForIdleTimeout,
+            quickCommandTimeout: quickCommandTimeout,
             tmutilPath: tmutilPath,
             diskutilPath: diskutilPath
         )

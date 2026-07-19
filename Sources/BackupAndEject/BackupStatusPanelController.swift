@@ -105,6 +105,18 @@ final class BackupStatusPanelController: NSWindowController {
             setIndeterminateProgress()
             detailLabel.stringValue = "Do not switch off the drive until ejection finishes."
             show()
+        case .canceling:
+            setIndeterminateProgress()
+            detailLabel.stringValue = """
+            Waiting for Time Machine to stop. The disk will stay connected.
+            """
+            show()
+        case .cancelled:
+            setStoppedProgress()
+            detailLabel.stringValue = """
+            No disk was ejected. You can start again when ready.
+            """
+            show()
         case .success:
             setDeterminateProgress(1)
             if state.message.localizedCaseInsensitiveContains("safety test") {
@@ -319,6 +331,8 @@ final class BackupStatusPanelController: NSWindowController {
             statusImageView.contentTintColor = .systemGreen
         case "exclamationmark.triangle.fill":
             statusImageView.contentTintColor = .systemRed
+        case "xmark.circle", "stop.circle":
+            statusImageView.contentTintColor = .systemOrange
         default:
             statusImageView.contentTintColor = .controlAccentColor
         }

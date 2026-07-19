@@ -14,12 +14,32 @@ SRGB_PROFILE="/System/Library/ColorSync/Profiles/sRGB Profile.icc"
 
 cd "$ROOT_DIR"
 
-swift build -c release --product BackupAndEject -Xswiftc -gnone
+ARCHITECTURE_BINARIES=()
+for architecture in arm64 x86_64; do
+    scratch_path="$ROOT_DIR/.build/$architecture"
+    triple="${architecture}-apple-macosx14.0"
+
+    swift build \
+        -c release \
+        --product BackupAndEject \
+        --scratch-path "$scratch_path" \
+        --triple "$triple" \
+        -Xswiftc -gnone
+
+    bin_path="$(swift build \
+        -c release \
+        --scratch-path "$scratch_path" \
+        --triple "$triple" \
+        --show-bin-path)"
+    ARCHITECTURE_BINARIES+=("$bin_path/BackupAndEject")
+done
 
 rm -rf "$APP_BUNDLE" "$MASTER_ICON" "$ICONSET_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$ICONSET_DIR"
 
-cp "$ROOT_DIR/.build/release/BackupAndEject" "$MACOS_DIR/BackupAndEject"
+xcrun lipo -create \
+    "${ARCHITECTURE_BINARIES[@]}" \
+    -output "$MACOS_DIR/BackupAndEject"
 chmod 755 "$MACOS_DIR/BackupAndEject"
 strip -S "$MACOS_DIR/BackupAndEject"
 cp "$ROOT_DIR/App/Info.plist" "$CONTENTS_DIR/Info.plist"

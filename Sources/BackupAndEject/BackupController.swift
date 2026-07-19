@@ -6,6 +6,8 @@ struct BackupSettings {
     let targetDestinationID: String
     let waitForDiskTimeout: TimeInterval
     let waitForUnmountTimeout: TimeInterval
+    let waitForIdleTimeout: TimeInterval
+    let quickCommandTimeout: TimeInterval
     let tmutilPath: String
     let diskutilPath: String
 }
@@ -16,6 +18,8 @@ enum BackupState {
     case checking(String)
     case backingUp(String)
     case ejecting(String)
+    case canceling(String)
+    case cancelled(String)
     case success(String)
     case failure(String)
 
@@ -26,6 +30,8 @@ enum BackupState {
              .checking(let message),
              .backingUp(let message),
              .ejecting(let message),
+             .canceling(let message),
+             .cancelled(let message),
              .success(let message),
              .failure(let message):
             return message
@@ -44,6 +50,10 @@ enum BackupState {
             return "clock.arrow.circlepath"
         case .ejecting:
             return "eject.fill"
+        case .canceling:
+            return "stop.circle"
+        case .cancelled:
+            return "xmark.circle"
         case .success:
             return "checkmark.circle.fill"
         case .failure:
@@ -53,9 +63,18 @@ enum BackupState {
 
     var isBusy: Bool {
         switch self {
-        case .waiting, .checking, .backingUp, .ejecting:
+        case .waiting, .checking, .backingUp, .ejecting, .canceling:
             return true
-        case .idle, .success, .failure:
+        case .idle, .cancelled, .success, .failure:
+            return false
+        }
+    }
+
+    var isCancellable: Bool {
+        switch self {
+        case .waiting, .checking, .backingUp:
+            return true
+        case .idle, .ejecting, .canceling, .cancelled, .success, .failure:
             return false
         }
     }
@@ -63,7 +82,9 @@ enum BackupState {
 
 enum BackupCompletion {
     case success(Date)
+    case alreadyUnmounted(Date)
     case ejected(Date)
+    case cancelled(String)
     case simulation
     case failure(message: String, backupCompleted: Bool)
     case ejectionFailure(message: String)
@@ -95,13 +116,111 @@ private final class BackupCommandOutcomeBox {
     }
 }
 
+private final class CancellationGate {
+    private enum Phase {
+        case idle
+        case cancellable
+        case backingUp
+        case ejecting
+    }
+
+    private let lock = NSLock()
+    private var phase = Phase.idle
+    private var cancellationRequested = false
+    private var stopCommandIssued = false
+
+    func begin() {
+        lock.lock()
+        phase = .cancellable
+        cancellationRequested = false
+        stopCommandIssued = false
+        lock.unlock()
+    }
+
+    func beginBackup() {
+        lock.lock()
+        phase = .backingUp
+        lock.unlock()
+    }
+
+    func returnToCancellablePhase() {
+        lock.lock()
+        if phase == .backingUp {
+            phase = .cancellable
+        }
+        lock.unlock()
+    }
+
+    func beginEjectIfNotCancelled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !cancellationRequested else {
+            return false
+        }
+
+        phase = .ejecting
+        return true
+    }
+
+    func finish() {
+        lock.lock()
+        phase = .idle
+        cancellationRequested = false
+        stopCommandIssued = false
+        lock.unlock()
+    }
+
+    func requestCancellation() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard phase == .cancellable || phase == .backingUp else {
+            return false
+        }
+
+        cancellationRequested = true
+        return true
+    }
+
+    var isCancellationRequested: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancellationRequested
+    }
+
+    var canCancel: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return phase == .cancellable || phase == .backingUp
+    }
+
+    func shouldIssueStopCommand() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard
+            phase == .backingUp,
+            cancellationRequested,
+            !stopCommandIssued
+        else {
+            return false
+        }
+
+        stopCommandIssued = true
+        return true
+    }
+}
+
 private enum BackupWorkflowError: LocalizedError {
+    case cancelled
     case destinationLookupFailed(String)
     case targetNotConfigured(String)
     case targetIdentityChanged(String)
     case targetNotMounted(String)
     case timedOutWaitingForDisk(name: String, timeout: TimeInterval)
-    case anotherBackupRunning
+    case selectedDestinationBackupRunning(String)
+    case anotherBackupRunning(destinationKnown: Bool)
     case commandFailed(step: String, details: String)
     case backupStillRunning(String)
     case ejectionFailed(name: String, details: String)
@@ -109,6 +228,8 @@ private enum BackupWorkflowError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .cancelled:
+            return "The operation was cancelled. No disk was ejected."
         case .destinationLookupFailed(let details):
             return "The app could not read Time Machine’s configured disks. \(details)"
         case .targetNotConfigured(let name):
@@ -119,8 +240,13 @@ private enum BackupWorkflowError: LocalizedError {
             return "\(name) is not mounted. It may already be safely ejected."
         case .timedOutWaitingForDisk(let name, let timeout):
             return "\(name) did not become available within \(Self.durationDescription(timeout)). Check its power and cable, then try again."
-        case .anotherBackupRunning:
-            return "Time Machine is already running another backup. Nothing was ejected; wait for it to finish and try again."
+        case .selectedDestinationBackupRunning(let name):
+            return "Time Machine is currently backing up to \(name). Nothing was ejected; wait for it to finish and try again."
+        case .anotherBackupRunning(let destinationKnown):
+            if destinationKnown {
+                return "Time Machine is backing up to a different disk. Nothing was ejected; wait for it to finish and try again."
+            }
+            return "Time Machine is already running a backup, but macOS did not identify its destination. Nothing was ejected; wait for it to finish and try again."
         case .commandFailed(let step, let details):
             return "\(step) failed. \(details)"
         case .backupStillRunning(let name):
@@ -165,8 +291,13 @@ final class BackupController {
         label: "com.aaronfish1labs.backupandeject.backup-command",
         qos: .userInitiated
     )
+    private let cancellationGate = CancellationGate()
 
     private var activityToken: NSObjectProtocol?
+
+    var canCancel: Bool {
+        cancellationGate.canCancel
+    }
 
     init(
         runner: CommandRunning = SystemCommandRunner(),
@@ -189,6 +320,7 @@ final class BackupController {
         guard !isBusy else { return }
 
         isBusy = true
+        cancellationGate.begin()
         activityToken = ProcessInfo.processInfo.beginActivity(
             options: [
                 .userInitiated,
@@ -210,6 +342,7 @@ final class BackupController {
         guard !isBusy else { return }
 
         isBusy = true
+        cancellationGate.begin()
         activityToken = ProcessInfo.processInfo.beginActivity(
             options: [
                 .userInitiated,
@@ -235,6 +368,7 @@ final class BackupController {
         guard !isBusy else { return }
 
         isBusy = true
+        cancellationGate.begin()
         emitProgress(nil)
         emit(
             .waiting(
@@ -246,10 +380,13 @@ final class BackupController {
             guard let self else { return }
 
             self.sleep(0.7)
+            guard !self.finishIfCancelled() else { return }
             self.emit(.checking("Safety test: checking the destination…"))
             self.sleep(0.7)
+            guard !self.finishIfCancelled() else { return }
             self.emit(.backingUp("Safety test: simulating a backup…"))
             for fraction in [0.12, 0.38, 0.67, 1.0] {
+                guard !self.finishIfCancelled() else { return }
                 self.emitProgress(
                     TimeMachineBackupStatus(
                         isRunning: true,
@@ -263,6 +400,10 @@ final class BackupController {
                 )
                 self.sleep(0.35)
             }
+            guard self.cancellationGate.beginEjectIfNotCancelled() else {
+                self.finishCancelled()
+                return
+            }
             self.emit(.ejecting("Safety test: simulating a safe eject…"))
             self.sleep(0.8)
 
@@ -273,23 +414,42 @@ final class BackupController {
         }
     }
 
+    @discardableResult
+    func cancelCurrentOperation() -> Bool {
+        precondition(Thread.isMainThread)
+        guard isBusy, cancellationGate.requestCancellation() else {
+            return false
+        }
+
+        emit(
+            .canceling(
+                "Cancelling — \(settings.targetName) will not be ejected…"
+            )
+        )
+        return true
+    }
+
     private func performBackup() {
         var backupCompleted = false
 
         do {
             let mountedDestination = try waitForMountedTarget()
+            let originalMountPoint = mountedDestination.mountPoint
 
             emit(
                 .checking(
                     "Checking Time Machine and \(settings.targetName)…"
                 )
             )
-            try ensureTimeMachineIsIdle()
+            try waitForSelectedDestinationToBecomeIdle()
+            try checkCancellation()
 
             emit(.backingUp("Preparing the Time Machine backup…"))
-            let backupResult = try runBackupWithMonitoring(
+            cancellationGate.beginBackup()
+            let backupResult = try runVerifiedBackup(
                 destinationID: mountedDestination.id
             )
+            try checkCancellation()
 
             guard backupResult.exitCode == 0 else {
                 throw BackupWorkflowError.commandFailed(
@@ -314,7 +474,9 @@ final class BackupController {
                 )
             )
             try waitUntilTimeMachineIsIdle()
-
+            guard cancellationGate.beginEjectIfNotCancelled() else {
+                throw BackupWorkflowError.cancelled
+            }
             emit(
                 .ejecting(
                     "Backup complete — safely ejecting \(settings.targetName)…"
@@ -322,13 +484,28 @@ final class BackupController {
             )
             sleep(2)
 
-            guard let latestMountPoint = try targetDestination().mountPoint else {
-                finishSuccessfulBackup()
+            let latestDestination = try targetDestination()
+            guard
+                let latestMountPoint = latestDestination.mountPoint,
+                fileExists(latestMountPoint)
+            else {
+                if
+                    let originalMountPoint,
+                    fileExists(originalMountPoint)
+                {
+                    throw BackupWorkflowError.diskStillMounted(
+                        settings.targetName
+                    )
+                }
+
+                finishSuccessfulBackup(alreadyUnmounted: true)
                 return
             }
 
             try ejectTarget(at: latestMountPoint)
-            finishSuccessfulBackup()
+            finishSuccessfulBackup(alreadyUnmounted: false)
+        } catch BackupWorkflowError.cancelled {
+            finishCancelled()
         } catch {
             let message = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
@@ -357,6 +534,9 @@ final class BackupController {
             }
 
             try ensureTimeMachineIsIdle()
+            guard cancellationGate.beginEjectIfNotCancelled() else {
+                throw BackupWorkflowError.cancelled
+            }
             emit(
                 .ejecting(
                     "Safely ejecting \(settings.targetName)…"
@@ -364,6 +544,8 @@ final class BackupController {
             )
             try ejectTarget(at: mountPoint)
             finishSuccessfulEjection()
+        } catch BackupWorkflowError.cancelled {
+            finishCancelled()
         } catch {
             let message = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
@@ -375,17 +557,35 @@ final class BackupController {
         }
     }
 
-    private func finishSuccessfulBackup() {
+    private func finishSuccessfulBackup(alreadyUnmounted: Bool) {
         let completionDate = Date()
         let formatter = DateFormatter()
         formatter.dateStyle = .none
         formatter.timeStyle = .short
+
+        if alreadyUnmounted {
+            finish(
+                state: .success(
+                    "Backup complete — \(settings.targetName) is already unmounted"
+                ),
+                completion: .alreadyUnmounted(completionDate)
+            )
+            return
+        }
 
         finish(
             state: .success(
                 "\(settings.targetName) safely ejected at \(formatter.string(from: completionDate))"
             ),
             completion: .success(completionDate)
+        )
+    }
+
+    private func finishCancelled() {
+        let message = "Cancelled — no disk was ejected"
+        finish(
+            state: .cancelled(message),
+            completion: .cancelled(message)
         )
     }
 
@@ -406,7 +606,8 @@ final class BackupController {
     private func ejectTarget(at mountPoint: String) throws {
         let ejectResult = try runner.run(
             settings.diskutilPath,
-            arguments: ["eject", mountPoint]
+            arguments: ["eject", mountPoint],
+            timeout: settings.quickCommandTimeout
         )
 
         guard ejectResult.exitCode == 0 else {
@@ -428,6 +629,7 @@ final class BackupController {
         )
 
         while Date() < deadline {
+            try checkCancellation()
             let destination = try targetDestination()
 
             if
@@ -473,24 +675,64 @@ final class BackupController {
         }
 
         while group.wait(timeout: .now() + 1) == .timedOut {
+            if cancellationGate.shouldIssueStopCommand() {
+                _ = try? runner.run(
+                    settings.tmutilPath,
+                    arguments: ["stopbackup"],
+                    timeout: settings.quickCommandTimeout
+                )
+            }
             reportCurrentBackupProgress()
         }
 
+        try checkCancellation()
         return try outcomeBox.result()
+    }
+
+    private func runVerifiedBackup(
+        destinationID: String
+    ) throws -> CommandResult {
+        let firstResult = try runBackupWithMonitoring(
+            destinationID: destinationID
+        )
+        guard firstResult.exitCode != 0 else {
+            return firstResult
+        }
+
+        let status = try currentTimeMachineStatus()
+        guard
+            status.isRunning,
+            status.destinationID == settings.targetDestinationID
+        else {
+            return firstResult
+        }
+
+        cancellationGate.returnToCancellablePhase()
+        try waitForSelectedDestinationToBecomeIdle(
+            startingWith: status
+        )
+        try checkCancellation()
+
+        emit(.backingUp("Starting the verified Time Machine backup…"))
+        cancellationGate.beginBackup()
+        return try runBackupWithMonitoring(
+            destinationID: destinationID
+        )
     }
 
     private func reportCurrentBackupProgress() {
         guard
             let result = try? runner.run(
                 settings.tmutilPath,
-                arguments: ["status"]
+                arguments: ["status"],
+                timeout: settings.quickCommandTimeout
             ),
             result.exitCode == 0
         else {
             return
         }
 
-        let status = TimeMachineStatusParser.parse(result.output)
+        let status = TimeMachineStatusParser.parse(result.standardOutput)
         guard status.isRunning else { return }
 
         emitProgress(status)
@@ -542,7 +784,8 @@ final class BackupController {
     private func configuredDestinations() throws -> [TimeMachineDestination] {
         let result = try runner.run(
             settings.tmutilPath,
-            arguments: ["destinationinfo", "-X"]
+            arguments: ["destinationinfo", "-X"],
+            timeout: settings.quickCommandTimeout
         )
 
         guard result.exitCode == 0 else {
@@ -555,7 +798,9 @@ final class BackupController {
         }
 
         do {
-            return try TimeMachineDestinationParser.parse(result.output)
+            return try TimeMachineDestinationParser.parse(
+                result.standardOutput
+            )
         } catch {
             throw BackupWorkflowError.destinationLookupFailed(
                 error.localizedDescription
@@ -564,16 +809,74 @@ final class BackupController {
     }
 
     private func ensureTimeMachineIsIdle() throws {
-        if try isTimeMachineRunning() {
-            throw BackupWorkflowError.anotherBackupRunning
+        let status = try currentTimeMachineStatus()
+        if status.isRunning {
+            if status.destinationID == settings.targetDestinationID {
+                throw BackupWorkflowError.selectedDestinationBackupRunning(
+                    settings.targetName
+                )
+            }
+            throw BackupWorkflowError.anotherBackupRunning(
+                destinationKnown: status.destinationID != nil
+            )
         }
     }
 
+    private func waitForSelectedDestinationToBecomeIdle(
+        startingWith initialStatus: TimeMachineBackupStatus? = nil
+    ) throws {
+        var status = try initialStatus ?? currentTimeMachineStatus()
+        guard status.isRunning else { return }
+
+        guard
+            let runningDestinationID = status.destinationID
+        else {
+            throw BackupWorkflowError.anotherBackupRunning(
+                destinationKnown: false
+            )
+        }
+
+        guard runningDestinationID == settings.targetDestinationID else {
+            throw BackupWorkflowError.anotherBackupRunning(
+                destinationKnown: true
+            )
+        }
+
+        emit(
+            .backingUp(
+                "Waiting for the existing backup to \(settings.targetName)…"
+            )
+        )
+
+        while status.isRunning {
+            try checkCancellation()
+
+            guard status.destinationID == settings.targetDestinationID else {
+                throw BackupWorkflowError.anotherBackupRunning(
+                    destinationKnown: status.destinationID != nil
+                )
+            }
+
+            emitProgress(status)
+            sleep(2)
+            status = try currentTimeMachineStatus()
+        }
+
+        emit(
+            .checking(
+                "Existing backup finished — starting a verified final backup…"
+            )
+        )
+    }
+
     private func waitUntilTimeMachineIsIdle() throws {
-        let deadline = Date().addingTimeInterval(30)
+        let deadline = Date().addingTimeInterval(
+            settings.waitForIdleTimeout
+        )
 
         while Date() < deadline {
-            if try !isTimeMachineRunning() {
+            try checkCancellation()
+            if try !currentTimeMachineStatus().isRunning {
                 return
             }
             sleep(2)
@@ -584,10 +887,11 @@ final class BackupController {
         )
     }
 
-    private func isTimeMachineRunning() throws -> Bool {
+    private func currentTimeMachineStatus() throws -> TimeMachineBackupStatus {
         let result = try runner.run(
             settings.tmutilPath,
-            arguments: ["status"]
+            arguments: ["status"],
+            timeout: settings.quickCommandTimeout
         )
 
         guard result.exitCode == 0 else {
@@ -600,7 +904,7 @@ final class BackupController {
             )
         }
 
-        return TimeMachineStatusParser.isBackupRunning(result.output)
+        return TimeMachineStatusParser.parse(result.standardOutput)
     }
 
     private func waitUntilTargetIsUnmounted() throws {
@@ -627,6 +931,20 @@ final class BackupController {
         throw BackupWorkflowError.diskStillMounted(
             settings.targetName
         )
+    }
+
+    private func checkCancellation() throws {
+        if cancellationGate.isCancellationRequested {
+            throw BackupWorkflowError.cancelled
+        }
+    }
+
+    private func finishIfCancelled() -> Bool {
+        guard cancellationGate.isCancellationRequested else {
+            return false
+        }
+        finishCancelled()
+        return true
     }
 
     private func usefulDetails(_ output: String, fallback: String) -> String {
@@ -662,6 +980,7 @@ final class BackupController {
                 self.activityToken = nil
             }
 
+            self.cancellationGate.finish()
             self.isBusy = false
             self.onStateChange?(state)
             self.onCompletion?(completion)

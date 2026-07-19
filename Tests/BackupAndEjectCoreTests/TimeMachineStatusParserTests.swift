@@ -15,6 +15,7 @@ final class TimeMachineStatusParserTests: XCTestCase {
                 totalFiles = 4000;
             };
             ClientID = "com.apple.backupd";
+            DestinationID = "TEST-DESTINATION-ID";
             Running = 1;
         }
         """
@@ -28,6 +29,7 @@ final class TimeMachineStatusParserTests: XCTestCase {
         XCTAssertEqual(status.totalBytes, 8_000_000_000)
         XCTAssertEqual(status.copiedFiles, 1_200)
         XCTAssertEqual(status.totalFiles, 4_000)
+        XCTAssertEqual(status.destinationID, "TEST-DESTINATION-ID")
     }
 
     func testDetectsIdleBackup() {
