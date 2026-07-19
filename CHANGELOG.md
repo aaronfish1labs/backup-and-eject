@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1
+
+- Adds a one-time in-app reminder that Backup & Eject follows the exclusions
+  already configured in Time Machine.
+- Offers a direct button to open Time Machine Settings before relying on a
+  backup.
+
 ## 1.0.0
 
 - First public version.

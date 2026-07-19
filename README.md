@@ -70,7 +70,8 @@ by a normal `diskutil eject`. No force-eject command is used.
 
 Backup & Eject does not change Time Machine exclusions or decide which source
 files macOS backs up. Review **Time Machine → Options** and verify your backups
-periodically.
+periodically. Version 1.0.1 and later also show this reminder once inside the
+app, with a button to open Time Machine Settings.
 
 ## Build and test
 

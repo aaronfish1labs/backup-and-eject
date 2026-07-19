@@ -10,6 +10,8 @@ enum AppConfiguration {
     static let diskutilPath = "/usr/sbin/diskutil"
 
     static let safetyCheckDefaultsKey = "WarnWhenAIAgentsAreRunning"
+    static let coverageNoticeAcknowledgedDefaultsKey =
+        "HasAcknowledgedTimeMachineCoverageNoticeV1"
     static let destinationNameDefaultsKey = "SelectedDestinationName"
     static let destinationIDDefaultsKey = "SelectedDestinationID"
     static let lastSuccessfulBackupDefaultsKeyPrefix = "LastSuccessfulBackup"
