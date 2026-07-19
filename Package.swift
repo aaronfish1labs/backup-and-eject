@@ -28,6 +28,10 @@ let package = Package(
         .testTarget(
             name: "BackupAndEjectCoreTests",
             dependencies: ["BackupAndEjectCore"]
+        ),
+        .testTarget(
+            name: "BackupAndEjectTests",
+            dependencies: ["BackupAndEject"]
         )
     ],
     swiftLanguageVersions: [.v5]

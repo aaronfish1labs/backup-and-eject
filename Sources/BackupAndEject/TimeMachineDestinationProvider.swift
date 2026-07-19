@@ -27,7 +27,8 @@ struct TimeMachineDestinationProvider {
     func configuredLocalDestinations() throws -> [TimeMachineDestination] {
         let result = try runner.run(
             tmutilPath,
-            arguments: ["destinationinfo", "-X"]
+            arguments: ["destinationinfo", "-X"],
+            timeout: AppConfiguration.quickCommandTimeout
         )
 
         guard result.exitCode == 0 else {
@@ -37,7 +38,9 @@ struct TimeMachineDestinationProvider {
             throw DestinationLookupError.commandFailed(details)
         }
 
-        return try TimeMachineDestinationParser.parse(result.output)
+        return try TimeMachineDestinationParser.parse(
+            result.standardOutput
+        )
             .filter { destination in
                 guard let kind = destination.kind else {
                     return true

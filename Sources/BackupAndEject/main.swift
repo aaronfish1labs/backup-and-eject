@@ -9,7 +9,8 @@ private func runSelfTest() -> Int32 {
 
         let destinationsResult = try runner.run(
             AppConfiguration.tmutilPath,
-            arguments: ["destinationinfo", "-X"]
+            arguments: ["destinationinfo", "-X"],
+            timeout: AppConfiguration.quickCommandTimeout
         )
 
         guard destinationsResult.exitCode == 0 else {
@@ -21,12 +22,13 @@ private func runSelfTest() -> Int32 {
         }
 
         let destinations = try TimeMachineDestinationParser.parse(
-            destinationsResult.output
+            destinationsResult.standardOutput
         )
 
         let statusResult = try runner.run(
             AppConfiguration.tmutilPath,
-            arguments: ["status"]
+            arguments: ["status"],
+            timeout: AppConfiguration.quickCommandTimeout
         )
 
         guard statusResult.exitCode == 0 else {
@@ -38,7 +40,7 @@ private func runSelfTest() -> Int32 {
         }
 
         let running = TimeMachineStatusParser.isBackupRunning(
-            statusResult.output
+            statusResult.standardOutput
         )
         print(
             "SELF-TEST PASSED: found \(destinations.count) configured Time Machine destination(s); running = \(running)"

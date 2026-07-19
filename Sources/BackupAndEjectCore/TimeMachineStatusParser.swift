@@ -8,6 +8,7 @@ public struct TimeMachineBackupStatus: Equatable {
     public let totalBytes: Int64?
     public let copiedFiles: Int64?
     public let totalFiles: Int64?
+    public let destinationID: String?
 
     public init(
         isRunning: Bool,
@@ -16,7 +17,8 @@ public struct TimeMachineBackupStatus: Equatable {
         copiedBytes: Int64?,
         totalBytes: Int64?,
         copiedFiles: Int64?,
-        totalFiles: Int64?
+        totalFiles: Int64?,
+        destinationID: String? = nil
     ) {
         self.isRunning = isRunning
         self.phase = phase
@@ -25,6 +27,7 @@ public struct TimeMachineBackupStatus: Equatable {
         self.totalBytes = totalBytes
         self.copiedFiles = copiedFiles
         self.totalFiles = totalFiles
+        self.destinationID = destinationID
     }
 }
 
@@ -93,7 +96,11 @@ public enum TimeMachineStatusParser {
             copiedBytes: copiedBytes,
             totalBytes: totalBytes,
             copiedFiles: copiedFiles,
-            totalFiles: totalFiles
+            totalFiles: totalFiles,
+            destinationID: stringValue(
+                for: "DestinationID",
+                in: output
+            )
         )
     }
 

@@ -41,7 +41,8 @@ private final class FakeCommandRunner: CommandRunning {
 
     func run(
         _ executable: String,
-        arguments: [String]
+        arguments: [String],
+        timeout: TimeInterval?
     ) throws -> CommandResult {
         lock.lock()
         calls.append(
@@ -72,6 +73,7 @@ private final class FakeCommandRunner: CommandRunning {
                                 bytes = 4000000000;
                                 totalBytes = 8000000000;
                             };
+                            DestinationID = "\(settings.targetDestinationID)";
                             Running = 1;
                         }
                         """
@@ -216,6 +218,8 @@ func runWorkflowSelfTest() -> Int32 {
         targetDestinationID: "TEST-DESTINATION-ID",
         waitForDiskTimeout: 1,
         waitForUnmountTimeout: 1,
+        waitForIdleTimeout: 1,
+        quickCommandTimeout: 1,
         tmutilPath: "/test/tmutil",
         diskutilPath: "/test/diskutil"
     )

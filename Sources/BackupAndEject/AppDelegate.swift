@@ -17,11 +17,13 @@ final class AppDelegate: NSObject {
         "Choose a backup disk"
     )
     private var currentProgress: TimeMachineBackupStatus?
+    private var pendingTermination = false
 
     private var statusItem: NSStatusItem!
     private var statusMenuItem: NSMenuItem!
     private var backupMenuItem: NSMenuItem!
     private var ejectMenuItem: NSMenuItem!
+    private var cancelMenuItem: NSMenuItem!
     private var testMenuItem: NSMenuItem!
     private var showStatusMenuItem: NSMenuItem!
     private var safetyMenuItem: NSMenuItem!
@@ -78,11 +80,37 @@ extension AppDelegate: NSApplicationDelegate {
             return .terminateNow
         }
 
-        showAlert(
-            title: "Safe operation still in progress",
-            message: "\(AppConfiguration.appName) must stay open until the current operation finishes."
-        )
-        return .terminateCancel
+        guard
+            currentState.isCancellable,
+            controller?.canCancel == true
+        else {
+            showAlert(
+                title: "Safe ejection is in progress",
+                message: "\(AppConfiguration.appName) must stay open until macOS finishes the current ejection."
+            )
+            return .terminateCancel
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Cancel the current operation and quit?"
+        alert.informativeText = """
+        Backup & Eject will ask Time Machine to stop if necessary. The disk will remain connected and will not be ejected.
+        """
+        alert.addButton(withTitle: "Keep Running")
+        alert.addButton(withTitle: "Cancel Operation and Quit")
+
+        guard alert.runModal() == .alertSecondButtonReturn else {
+            return .terminateCancel
+        }
+
+        guard controller?.cancelCurrentOperation() == true else {
+            return .terminateCancel
+        }
+
+        pendingTermination = true
+        return .terminateLater
     }
 }
 
@@ -182,6 +210,16 @@ private extension AppDelegate {
             accessibilityDescription: "Eject backup disk"
         )
         menu.addItem(ejectMenuItem)
+
+        cancelMenuItem = NSMenuItem(
+            title: "Cancel Current Operation",
+            action: #selector(cancelCurrentOperation),
+            keyEquivalent: "."
+        )
+        cancelMenuItem.target = self
+        cancelMenuItem.isHidden = true
+        cancelMenuItem.isEnabled = false
+        menu.addItem(cancelMenuItem)
 
         menu.addItem(.separator())
 
@@ -318,7 +356,10 @@ private extension AppDelegate {
         chooseDiskMenuItem.isEnabled = isAvailable
         safetyMenuItem.isEnabled = isAvailable
         launchAtLoginMenuItem.isEnabled = isAvailable
-        quitMenuItem.isEnabled = isAvailable
+        cancelMenuItem.isHidden = !state.isBusy
+        cancelMenuItem.isEnabled =
+            state.isCancellable && controller?.canCancel == true
+        quitMenuItem.isEnabled = isAvailable || state.isCancellable
 
         setStatusIcon(
             symbolName: state.symbolName,
@@ -349,12 +390,28 @@ private extension AppDelegate {
                 title: "\(targetName) is safe to switch off",
                 body: "The Time Machine backup completed and the disk was safely ejected."
             )
+        case .alreadyUnmounted(let date):
+            if let destinationID = selectedDestination?.id {
+                defaults.set(
+                    date,
+                    forKey: AppConfiguration.lastSuccessfulBackupKey(
+                        for: destinationID
+                    )
+                )
+            }
+            sendNotification(
+                identifier: "backup-unmounted-\(date.timeIntervalSince1970)",
+                title: "\(targetName) is safe to switch off",
+                body: "The Time Machine backup completed and the disk was already unmounted."
+            )
         case .ejected(let date):
             sendNotification(
                 identifier: "ejection-success-\(date.timeIntervalSince1970)",
                 title: "\(targetName) is safe to switch off",
                 body: "The disk was safely ejected. No backup was started."
             )
+        case .cancelled:
+            break
         case .simulation:
             sendNotification(
                 identifier: "safety-test-\(Date().timeIntervalSince1970)",
@@ -384,6 +441,11 @@ private extension AppDelegate {
             )
             NSSound.beep()
             showAlert(title: title, message: message)
+        }
+
+        if pendingTermination {
+            pendingTermination = false
+            NSApp.reply(toApplicationShouldTerminate: true)
         }
     }
 
@@ -434,6 +496,10 @@ private extension AppDelegate {
 
         requestNotificationPermission()
         controller.startEjectOnly()
+    }
+
+    @objc func cancelCurrentOperation() {
+        _ = controller?.cancelCurrentOperation()
     }
 
     @objc func runSafetyTest() {
