@@ -49,10 +49,16 @@ extension AppDelegate: NSApplicationDelegate {
 
         if let selection = destinationPreferences.load() {
             install(selection)
+            DispatchQueue.main.async { [weak self] in
+                _ = self?.presentTimeMachineCoverageNoticeIfNeeded()
+            }
         } else {
             applyUnconfiguredState()
             DispatchQueue.main.async { [weak self] in
-                self?.loadDestinationsAndPresentPicker()
+                guard let self else { return }
+                if self.presentTimeMachineCoverageNoticeIfNeeded() {
+                    self.loadDestinationsAndPresentPicker()
+                }
             }
         }
 
@@ -572,6 +578,40 @@ private extension AppDelegate {
         if alert.runModal() == .alertFirstButtonReturn {
             openTimeMachineSettings()
         }
+    }
+
+    func presentTimeMachineCoverageNoticeIfNeeded() -> Bool {
+        guard !defaults.bool(
+            forKey: AppConfiguration.coverageNoticeAcknowledgedDefaultsKey
+        ) else {
+            return true
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Check what Time Machine will protect"
+        alert.informativeText = """
+        Backup & Eject follows your existing Time Machine settings, including exclusions.
+
+        Before relying on this backup, open Time Machine → Options and make sure every important folder and volume is included.
+        """
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Open Time Machine Settings")
+
+        let response = alert.runModal()
+        defaults.set(
+            true,
+            forKey: AppConfiguration.coverageNoticeAcknowledgedDefaultsKey
+        )
+
+        if response == .alertSecondButtonReturn {
+            openTimeMachineSettings()
+            return false
+        }
+
+        return true
     }
 
     @objc func toggleAgentSafetyCheck() {
