@@ -25,10 +25,10 @@ final class BackupStatusPanelController: NSWindowController {
             defer: false
         )
         panel.isReleasedWhenClosed = false
-        panel.isFloatingPanel = true
+        panel.isFloatingPanel = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
-        panel.level = .floating
+        panel.level = .normal
         panel.collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,
@@ -139,6 +139,9 @@ final class BackupStatusPanelController: NSWindowController {
 
     func show() {
         precondition(Thread.isMainThread)
+        guard window?.isVisible != true else {
+            return
+        }
         positionAtBottomRight()
         window?.orderFrontRegardless()
     }
