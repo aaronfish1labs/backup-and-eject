@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1
+
+- Lets other apps cover the backup progress panel after it first appears.
+- Prevents live progress updates from repeatedly bringing the panel forward.
+- Adds regression tests for the panel's normal window level and repeated
+  presentation behaviour.
+
 ## 1.1.0
 
 - Waits for an automatic backup already running to the selected disk, then
