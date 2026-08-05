@@ -15,20 +15,23 @@ enum DestinationLookupError: LocalizedError {
 struct TimeMachineDestinationProvider {
     private let runner: CommandRunning
     private let tmutilPath: String
+    private let timeout: TimeInterval
 
     init(
         runner: CommandRunning = SystemCommandRunner(),
-        tmutilPath: String = AppConfiguration.tmutilPath
+        tmutilPath: String = AppConfiguration.tmutilPath,
+        timeout: TimeInterval = AppConfiguration.destinationInfoCommandTimeout
     ) {
         self.runner = runner
         self.tmutilPath = tmutilPath
+        self.timeout = timeout
     }
 
     func configuredLocalDestinations() throws -> [TimeMachineDestination] {
         let result = try runner.run(
             tmutilPath,
             arguments: ["destinationinfo", "-X"],
-            timeout: AppConfiguration.quickCommandTimeout
+            timeout: timeout
         )
 
         guard result.exitCode == 0 else {

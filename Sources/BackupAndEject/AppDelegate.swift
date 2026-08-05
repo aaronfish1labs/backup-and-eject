@@ -418,10 +418,16 @@ private extension AppDelegate {
                 title: "Safety test passed",
                 body: "Notifications work. No backup was started and no disk was touched."
             )
-        case .failure(let message, let backupCompleted):
-            let title = backupCompleted
-                ? "Backup completed, but \(targetName) is still connected"
-                : "The backup did not complete"
+        case .failure(let message, let stage):
+            let title: String
+            switch stage {
+            case .beforeBackup:
+                title = "The backup could not start"
+            case .duringBackup:
+                title = "The backup did not complete"
+            case .afterBackup:
+                title = "Backup completed, but \(targetName) is still connected"
+            }
 
             sendNotification(
                 identifier: "backup-failure-\(Date().timeIntervalSince1970)",

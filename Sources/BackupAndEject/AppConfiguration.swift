@@ -7,6 +7,8 @@ enum AppConfiguration {
     static let waitForUnmountTimeout: TimeInterval = 20
     static let waitForIdleTimeout: TimeInterval = 180
     static let quickCommandTimeout: TimeInterval = 30
+    static let destinationInfoCommandTimeout: TimeInterval = 10
+    static let statusCommandTimeout: TimeInterval = 10
 
     static let tmutilPath = "/usr/bin/tmutil"
     static let diskutilPath = "/usr/sbin/diskutil"
@@ -28,6 +30,8 @@ enum AppConfiguration {
             waitForUnmountTimeout: waitForUnmountTimeout,
             waitForIdleTimeout: waitForIdleTimeout,
             quickCommandTimeout: quickCommandTimeout,
+            destinationInfoCommandTimeout: destinationInfoCommandTimeout,
+            statusCommandTimeout: statusCommandTimeout,
             tmutilPath: tmutilPath,
             diskutilPath: diskutilPath
         )

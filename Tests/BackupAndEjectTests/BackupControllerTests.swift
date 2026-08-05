@@ -28,6 +28,88 @@ final class BackupControllerTests: XCTestCase {
         )
     }
 
+    func testRetriesOneTransientStatusTimeoutThenCompletesSafely() {
+        let harness = WorkflowHarness(statusTimeoutsRemaining: 1)
+
+        let completion = harness.runBackup()
+
+        guard case .success? = completion else {
+            return XCTFail("Expected the retry to recover")
+        }
+        XCTAssertGreaterThanOrEqual(harness.runner.statusCount, 2)
+        XCTAssertEqual(harness.runner.startBackupCount, 1)
+        XCTAssertEqual(harness.runner.ejectCount, 1)
+    }
+
+    func testRetriesOneTransientDestinationTimeoutThenCompletesSafely() {
+        let harness = WorkflowHarness(
+            destinationInfoTimeoutsRemaining: 1
+        )
+
+        let completion = harness.runBackup()
+
+        guard case .success? = completion else {
+            return XCTFail("Expected the destination retry to recover")
+        }
+        XCTAssertGreaterThanOrEqual(
+            harness.runner.destinationInfoCount,
+            2
+        )
+        XCTAssertEqual(harness.runner.startBackupCount, 1)
+        XCTAssertEqual(harness.runner.ejectCount, 1)
+    }
+
+    func testPersistentDestinationTimeoutExplainsUSBResetAndDoesNotStartBackup() {
+        let harness = WorkflowHarness(
+            destinationInfoTimeoutsRemaining: 2
+        )
+
+        let completion = harness.runBackup()
+
+        guard case .failure(let message, let stage)? = completion else {
+            return XCTFail("Expected a safe destination-query failure")
+        }
+        XCTAssertEqual(stage, .beforeBackup)
+        XCTAssertTrue(message.contains("USB data connection or hub resets"))
+        XCTAssertTrue(message.contains("did not eject"))
+        XCTAssertEqual(harness.runner.destinationInfoCount, 2)
+        XCTAssertEqual(harness.runner.startBackupCount, 0)
+        XCTAssertEqual(harness.runner.ejectCount, 0)
+    }
+
+    func testPersistentStatusTimeoutLeavesDiskConnected() {
+        let harness = WorkflowHarness(statusTimeoutsRemaining: 2)
+
+        let completion = harness.runBackup()
+
+        guard case .failure(let message, let stage)? = completion else {
+            return XCTFail("Expected a safe failure")
+        }
+        XCTAssertEqual(stage, .beforeBackup)
+        XCTAssertTrue(message.contains("macOS stopped responding"))
+        XCTAssertEqual(harness.runner.statusCount, 2)
+        XCTAssertEqual(harness.runner.startBackupCount, 0)
+        XCTAssertEqual(harness.runner.ejectCount, 0)
+    }
+
+    func testUnexpectedDisconnectReplacesGenericTimeoutMessage() {
+        let harness = WorkflowHarness(
+            statusTimeoutsRemaining: 2,
+            disconnectWhenStatusTimesOut: true
+        )
+
+        let completion = harness.runBackup()
+
+        guard case .failure(let message, let stage)? = completion else {
+            return XCTFail("Expected a disconnect failure")
+        }
+        XCTAssertEqual(stage, .beforeBackup)
+        XCTAssertTrue(message.contains("macOS lost access"))
+        XCTAssertFalse(message.contains("did not respond"))
+        XCTAssertEqual(harness.runner.startBackupCount, 0)
+        XCTAssertEqual(harness.runner.ejectCount, 0)
+    }
+
     func testRefusesRunningBackupToDifferentDestination() {
         let harness = WorkflowHarness(
             existingBackupDestinationID: "OTHER-ID",
@@ -36,10 +118,10 @@ final class BackupControllerTests: XCTestCase {
 
         let completion = harness.runBackup()
 
-        guard case .failure(_, let backupCompleted)? = completion else {
+        guard case .failure(_, let stage)? = completion else {
             return XCTFail("Expected a safe refusal")
         }
-        XCTAssertFalse(backupCompleted)
+        XCTAssertEqual(stage, .beforeBackup)
         XCTAssertEqual(harness.runner.startBackupCount, 0)
         XCTAssertEqual(harness.runner.ejectCount, 0)
     }
@@ -52,10 +134,10 @@ final class BackupControllerTests: XCTestCase {
 
         let completion = harness.runBackup()
 
-        guard case .failure(let message, let backupCompleted)? = completion else {
+        guard case .failure(let message, let stage)? = completion else {
             return XCTFail("Expected a conservative refusal")
         }
-        XCTAssertFalse(backupCompleted)
+        XCTAssertEqual(stage, .beforeBackup)
         XCTAssertTrue(message.contains("did not identify its destination"))
         XCTAssertEqual(harness.runner.startBackupCount, 0)
         XCTAssertEqual(harness.runner.ejectCount, 0)
@@ -80,10 +162,10 @@ final class BackupControllerTests: XCTestCase {
 
         let completion = harness.runBackup()
 
-        guard case .failure(let message, let backupCompleted)? = completion else {
+        guard case .failure(let message, let stage)? = completion else {
             return XCTFail("Expected an identity-change failure")
         }
-        XCTAssertFalse(backupCompleted)
+        XCTAssertEqual(stage, .beforeBackup)
         XCTAssertTrue(message.contains("identity has changed"))
         XCTAssertEqual(harness.runner.startBackupCount, 0)
         XCTAssertEqual(harness.runner.ejectCount, 0)
@@ -137,10 +219,10 @@ final class BackupControllerTests: XCTestCase {
 
         let completion = harness.runBackup()
 
-        guard case .failure(_, let backupCompleted)? = completion else {
+        guard case .failure(_, let stage)? = completion else {
             return XCTFail("Expected a post-backup mount verification failure")
         }
-        XCTAssertTrue(backupCompleted)
+        XCTAssertEqual(stage, .afterBackup)
         XCTAssertEqual(harness.runner.ejectCount, 0)
     }
 
@@ -163,10 +245,10 @@ final class BackupControllerTests: XCTestCase {
 
         let completion = harness.runBackup()
 
-        guard case .failure(_, let backupCompleted)? = completion else {
+        guard case .failure(_, let stage)? = completion else {
             return XCTFail("Expected an idle timeout")
         }
-        XCTAssertTrue(backupCompleted)
+        XCTAssertEqual(stage, .afterBackup)
         XCTAssertEqual(harness.runner.ejectCount, 0)
     }
 
@@ -220,8 +302,14 @@ private final class TestCommandRunner: CommandRunning {
     private let blockStartBackupUntilStopped: Bool
     private let failFirstStartWithSameDestinationBackup: Bool
     private let remainRunningAfterBackup: Bool
+    private let disconnectWhenStatusTimesOut: Bool
     private let stopSemaphore = DispatchSemaphore(value: 0)
 
+    private var destinationInfoTimeoutsRemaining: Int
+    private var statusTimeoutsRemaining: Int
+    private var recordedDestinationInfoCount = 0
+    private var recordedStatusCount = 0
+    private var disconnected = false
     private var recordedCalls: [RecordedCommand] = []
     private var recordedStartBackupCount = 0
     private var recordedStopBackupCount = 0
@@ -253,6 +341,18 @@ private final class TestCommandRunner: CommandRunning {
         return recordedEjectCount
     }
 
+    var statusCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedStatusCount
+    }
+
+    var destinationInfoCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedDestinationInfoCount
+    }
+
     init(
         existingBackupDestinationID: String?,
         existingBackupPolls: Int,
@@ -261,7 +361,10 @@ private final class TestCommandRunner: CommandRunning {
         reportUnmountedAfterBackup: Bool,
         blockStartBackupUntilStopped: Bool,
         failFirstStartWithSameDestinationBackup: Bool,
-        remainRunningAfterBackup: Bool
+        remainRunningAfterBackup: Bool,
+        destinationInfoTimeoutsRemaining: Int,
+        statusTimeoutsRemaining: Int,
+        disconnectWhenStatusTimesOut: Bool
     ) {
         self.existingBackupDestinationID = existingBackupDestinationID
         self.existingBackupPolls = existingBackupPolls
@@ -272,6 +375,11 @@ private final class TestCommandRunner: CommandRunning {
         self.failFirstStartWithSameDestinationBackup =
             failFirstStartWithSameDestinationBackup
         self.remainRunningAfterBackup = remainRunningAfterBackup
+        self.destinationInfoTimeoutsRemaining =
+            destinationInfoTimeoutsRemaining
+        self.statusTimeoutsRemaining = statusTimeoutsRemaining
+        self.disconnectWhenStatusTimesOut =
+            disconnectWhenStatusTimesOut
     }
 
     func run(
@@ -287,11 +395,42 @@ private final class TestCommandRunner: CommandRunning {
 
         switch arguments.first {
         case "destinationinfo":
+            lock.lock()
+            recordedDestinationInfoCount += 1
+            let shouldTimeOut = destinationInfoTimeoutsRemaining > 0
+            if shouldTimeOut {
+                destinationInfoTimeoutsRemaining -= 1
+            }
+            lock.unlock()
+
+            if shouldTimeOut {
+                throw CommandRunnerError.timedOut(
+                    executable: executable,
+                    timeout: timeout ?? 0
+                )
+            }
             return CommandResult(
                 exitCode: 0,
                 output: try destinationInfo()
             )
         case "status":
+            lock.lock()
+            recordedStatusCount += 1
+            let shouldTimeOut = statusTimeoutsRemaining > 0
+            if shouldTimeOut {
+                statusTimeoutsRemaining -= 1
+                if disconnectWhenStatusTimesOut {
+                    disconnected = true
+                }
+            }
+            lock.unlock()
+
+            if shouldTimeOut {
+                throw CommandRunnerError.timedOut(
+                    executable: executable,
+                    timeout: timeout ?? 0
+                )
+            }
             return CommandResult(
                 exitCode: 0,
                 output: statusOutput()
@@ -352,6 +491,9 @@ private final class TestCommandRunner: CommandRunning {
         defer { lock.unlock() }
 
         if ejected {
+            return false
+        }
+        if disconnected {
             return false
         }
         if hasCompletedBackup, reportUnmountedAfterBackup {
@@ -438,7 +580,10 @@ private final class WorkflowHarness {
         originalMountPathExistsAfterBackup: Bool = false,
         blockStartBackupUntilStopped: Bool = false,
         failFirstStartWithSameDestinationBackup: Bool = false,
-        remainRunningAfterBackup: Bool = false
+        remainRunningAfterBackup: Bool = false,
+        destinationInfoTimeoutsRemaining: Int = 0,
+        statusTimeoutsRemaining: Int = 0,
+        disconnectWhenStatusTimesOut: Bool = false
     ) {
         runner = TestCommandRunner(
             existingBackupDestinationID: existingBackupDestinationID,
@@ -449,7 +594,12 @@ private final class WorkflowHarness {
             blockStartBackupUntilStopped: blockStartBackupUntilStopped,
             failFirstStartWithSameDestinationBackup:
                 failFirstStartWithSameDestinationBackup,
-            remainRunningAfterBackup: remainRunningAfterBackup
+            remainRunningAfterBackup: remainRunningAfterBackup,
+            destinationInfoTimeoutsRemaining:
+                destinationInfoTimeoutsRemaining,
+            statusTimeoutsRemaining: statusTimeoutsRemaining,
+            disconnectWhenStatusTimesOut:
+                disconnectWhenStatusTimesOut
         )
 
         let runner = self.runner
@@ -462,6 +612,8 @@ private final class WorkflowHarness {
                 waitForUnmountTimeout: 0.25,
                 waitForIdleTimeout: 0.25,
                 quickCommandTimeout: 0.25,
+                destinationInfoCommandTimeout: 0.25,
+                statusCommandTimeout: 0.25,
                 tmutilPath: "/test/tmutil",
                 diskutilPath: "/test/diskutil"
             ),
