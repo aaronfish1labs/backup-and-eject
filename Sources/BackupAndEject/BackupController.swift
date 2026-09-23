@@ -704,6 +704,7 @@ final class BackupController {
             group.leave()
         }
 
+        var nextProgressCheck = 0.0
         while group.wait(timeout: .now() + 1) == .timedOut {
             if cancellationGate.shouldIssueStopCommand() {
                 _ = try? runner.run(
@@ -712,7 +713,11 @@ final class BackupController {
                     timeout: settings.quickCommandTimeout
                 )
             }
-            reportCurrentBackupProgress()
+            let now = ProcessInfo.processInfo.systemUptime
+            if now >= nextProgressCheck {
+                reportCurrentBackupProgress()
+                nextProgressCheck = now + 5
+            }
         }
 
         try checkCancellation()

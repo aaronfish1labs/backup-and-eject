@@ -209,8 +209,15 @@ public final class SystemCommandRunner: CommandRunning {
     private static let terminationGracePeriod: TimeInterval = 2
     private static let forcedTerminationGracePeriod: TimeInterval = 0.25
     private static let outputDrainTimeout: TimeInterval = 1
+    private let launch: (Process) throws -> Void
 
-    public init() {}
+    public init() {
+        launch = { try $0.run() }
+    }
+
+    init(launch: @escaping (Process) throws -> Void) {
+        self.launch = launch
+    }
 
     public func run(
         _ executable: String,
@@ -221,6 +228,36 @@ public final class SystemCommandRunner: CommandRunning {
             throw CommandRunnerError.executableNotFound(executable)
         }
 
+        for _ in 0..<2 {
+            do {
+                return try runOnce(
+                    executable,
+                    arguments: arguments,
+                    timeout: timeout
+                )
+            } catch let error as CommandRunnerError {
+                guard case .launchFailed(_, let underlying) = error,
+                      (underlying as NSError).domain == NSPOSIXErrorDomain,
+                      (underlying as NSError).code == Int(EBADF)
+                else {
+                    throw error
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+
+        return try runOnce(
+            executable,
+            arguments: arguments,
+            timeout: timeout
+        )
+    }
+
+    private func runOnce(
+        _ executable: String,
+        arguments: [String],
+        timeout: TimeInterval?
+    ) throws -> CommandResult {
         let process = Process()
         let standardOutputPipe = Pipe()
         let standardErrorPipe = Pipe()
@@ -239,10 +276,8 @@ public final class SystemCommandRunner: CommandRunning {
                 completion.signal()
             }
         }
-        outputCollector.start()
-
         do {
-            try process.run()
+            try launch(process)
         } catch {
             outputCollector.stop()
             throw CommandRunnerError.launchFailed(
@@ -250,6 +285,7 @@ public final class SystemCommandRunner: CommandRunning {
                 underlying: error
             )
         }
+        outputCollector.start()
 
         if let timeout, let completion {
             if completion.wait(
