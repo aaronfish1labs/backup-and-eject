@@ -10,7 +10,7 @@ private func runSelfTest() -> Int32 {
         let destinationsResult = try runner.run(
             AppConfiguration.tmutilPath,
             arguments: ["destinationinfo", "-X"],
-            timeout: AppConfiguration.quickCommandTimeout
+            timeout: AppConfiguration.destinationInfoCommandTimeout
         )
 
         guard destinationsResult.exitCode == 0 else {
@@ -28,7 +28,7 @@ private func runSelfTest() -> Int32 {
         let statusResult = try runner.run(
             AppConfiguration.tmutilPath,
             arguments: ["status"],
-            timeout: AppConfiguration.quickCommandTimeout
+            timeout: AppConfiguration.statusCommandTimeout
         )
 
         guard statusResult.exitCode == 0 else {

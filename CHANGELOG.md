@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.2
+
+- Stops timed-out system-command output collection at a firm deadline instead
+  of waiting indefinitely for inherited pipes to close.
+- Gives destination and status checks shorter limits and retries one transient
+  stall before failing safely.
+- Distinguishes a backup that never started from one that failed later, and
+  explains that a powered disk can vanish when its USB data link or hub resets.
+- Reduces destination polling while a selected disk is unavailable and keeps
+  the no-eject-on-uncertainty rule.
+- Adds regression tests for bounded output collection, destination and status
+  retries, persistent stalls, and unexpected loss of disk access.
+
 ## 1.1.1
 
 - Lets other apps cover the backup progress panel after it first appears.

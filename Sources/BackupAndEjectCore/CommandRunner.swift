@@ -70,15 +70,15 @@ private final class CommandOutputBox {
     private var standardOutput = Data()
     private var standardError = Data()
 
-    func storeStandardOutput(_ data: Data) {
+    func appendStandardOutput(_ data: Data) {
         lock.lock()
-        standardOutput = data
+        standardOutput.append(data)
         lock.unlock()
     }
 
-    func storeStandardError(_ data: Data) {
+    func appendStandardError(_ data: Data) {
         lock.lock()
-        standardError = data
+        standardError.append(data)
         lock.unlock()
     }
 
@@ -100,8 +100,124 @@ private final class CommandOutputBox {
     }
 }
 
+private final class CommandPipeReader {
+    private let fileHandle: FileHandle
+    private let receive: (Data) -> Void
+    private let didFinish: () -> Void
+    private let lock = NSLock()
+    private var finished = false
+
+    init(
+        fileHandle: FileHandle,
+        receive: @escaping (Data) -> Void,
+        didFinish: @escaping () -> Void
+    ) {
+        self.fileHandle = fileHandle
+        self.receive = receive
+        self.didFinish = didFinish
+    }
+
+    func start() {
+        fileHandle.readabilityHandler = { [weak self] handle in
+            self?.consume(handle.availableData)
+        }
+    }
+
+    func stop() {
+        finishIfNeeded()
+    }
+
+    private func consume(_ data: Data) {
+        guard !data.isEmpty else {
+            finishIfNeeded()
+            return
+        }
+
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        receive(data)
+        lock.unlock()
+    }
+
+    private func finishIfNeeded() {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        lock.unlock()
+
+        fileHandle.readabilityHandler = nil
+        didFinish()
+    }
+}
+
+final class CommandOutputCollector {
+    private let outputBox = CommandOutputBox()
+    private let completion = DispatchGroup()
+    private let standardOutputReader: CommandPipeReader
+    private let standardErrorReader: CommandPipeReader
+
+    init(
+        standardOutputPipe: Pipe,
+        standardErrorPipe: Pipe
+    ) {
+        completion.enter()
+        completion.enter()
+
+        let completion = self.completion
+        let outputBox = self.outputBox
+        standardOutputReader = CommandPipeReader(
+            fileHandle: standardOutputPipe.fileHandleForReading,
+            receive: { outputBox.appendStandardOutput($0) },
+            didFinish: { completion.leave() }
+        )
+        standardErrorReader = CommandPipeReader(
+            fileHandle: standardErrorPipe.fileHandleForReading,
+            receive: { outputBox.appendStandardError($0) },
+            didFinish: { completion.leave() }
+        )
+    }
+
+    func start() {
+        standardOutputReader.start()
+        standardErrorReader.start()
+    }
+
+    func finish(
+        timeout: TimeInterval
+    ) -> (standardOutput: String, standardError: String) {
+        if completion.wait(
+            timeout: .now() + max(timeout, 0.01)
+        ) == .timedOut {
+            stop()
+        }
+        return outputBox.strings()
+    }
+
+    func stop() {
+        standardOutputReader.stop()
+        standardErrorReader.stop()
+    }
+}
+
 public final class SystemCommandRunner: CommandRunning {
-    public init() {}
+    private static let terminationGracePeriod: TimeInterval = 2
+    private static let forcedTerminationGracePeriod: TimeInterval = 0.25
+    private static let outputDrainTimeout: TimeInterval = 1
+    private let launch: (Process) throws -> Void
+
+    public init() {
+        launch = { try $0.run() }
+    }
+
+    init(launch: @escaping (Process) throws -> Void) {
+        self.launch = launch
+    }
 
     public func run(
         _ executable: String,
@@ -112,11 +228,43 @@ public final class SystemCommandRunner: CommandRunning {
             throw CommandRunnerError.executableNotFound(executable)
         }
 
+        for _ in 0..<2 {
+            do {
+                return try runOnce(
+                    executable,
+                    arguments: arguments,
+                    timeout: timeout
+                )
+            } catch let error as CommandRunnerError {
+                guard case .launchFailed(_, let underlying) = error,
+                      (underlying as NSError).domain == NSPOSIXErrorDomain,
+                      (underlying as NSError).code == Int(EBADF)
+                else {
+                    throw error
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+
+        return try runOnce(
+            executable,
+            arguments: arguments,
+            timeout: timeout
+        )
+    }
+
+    private func runOnce(
+        _ executable: String,
+        arguments: [String],
+        timeout: TimeInterval?
+    ) throws -> CommandResult {
         let process = Process()
         let standardOutputPipe = Pipe()
         let standardErrorPipe = Pipe()
-        let outputBox = CommandOutputBox()
-        let readGroup = DispatchGroup()
+        let outputCollector = CommandOutputCollector(
+            standardOutputPipe: standardOutputPipe,
+            standardErrorPipe: standardErrorPipe
+        )
         let completion = timeout.map { _ in DispatchSemaphore(value: 0) }
 
         process.executableURL = URL(fileURLWithPath: executable)
@@ -128,31 +276,16 @@ public final class SystemCommandRunner: CommandRunning {
                 completion.signal()
             }
         }
-
         do {
-            try process.run()
+            try launch(process)
         } catch {
+            outputCollector.stop()
             throw CommandRunnerError.launchFailed(
                 executable: executable,
                 underlying: error
             )
         }
-
-        readGroup.enter()
-        DispatchQueue.global(qos: .utility).async {
-            outputBox.storeStandardOutput(
-                standardOutputPipe.fileHandleForReading.readDataToEndOfFile()
-            )
-            readGroup.leave()
-        }
-
-        readGroup.enter()
-        DispatchQueue.global(qos: .utility).async {
-            outputBox.storeStandardError(
-                standardErrorPipe.fileHandleForReading.readDataToEndOfFile()
-            )
-            readGroup.leave()
-        }
+        outputCollector.start()
 
         if let timeout, let completion {
             if completion.wait(
@@ -160,12 +293,17 @@ public final class SystemCommandRunner: CommandRunning {
             ) == .timedOut {
                 process.terminate()
 
-                if completion.wait(timeout: .now() + 2) == .timedOut {
+                if completion.wait(
+                    timeout: .now() + Self.terminationGracePeriod
+                ) == .timedOut {
                     Darwin.kill(process.processIdentifier, SIGKILL)
-                    process.waitUntilExit()
+                    _ = completion.wait(
+                        timeout: .now()
+                            + Self.forcedTerminationGracePeriod
+                    )
                 }
 
-                readGroup.wait()
+                outputCollector.stop()
                 throw CommandRunnerError.timedOut(
                     executable: executable,
                     timeout: timeout
@@ -175,8 +313,9 @@ public final class SystemCommandRunner: CommandRunning {
             process.waitUntilExit()
         }
 
-        readGroup.wait()
-        let output = outputBox.strings()
+        let output = outputCollector.finish(
+            timeout: Self.outputDrainTimeout
+        )
 
         return CommandResult(
             exitCode: process.terminationStatus,

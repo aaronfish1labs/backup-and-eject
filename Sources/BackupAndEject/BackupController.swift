@@ -8,6 +8,8 @@ struct BackupSettings {
     let waitForUnmountTimeout: TimeInterval
     let waitForIdleTimeout: TimeInterval
     let quickCommandTimeout: TimeInterval
+    let destinationInfoCommandTimeout: TimeInterval
+    let statusCommandTimeout: TimeInterval
     let tmutilPath: String
     let diskutilPath: String
 }
@@ -80,13 +82,19 @@ enum BackupState {
     }
 }
 
+enum BackupFailureStage: Equatable {
+    case beforeBackup
+    case duringBackup
+    case afterBackup
+}
+
 enum BackupCompletion {
     case success(Date)
     case alreadyUnmounted(Date)
     case ejected(Date)
     case cancelled(String)
     case simulation
-    case failure(message: String, backupCompleted: Bool)
+    case failure(message: String, stage: BackupFailureStage)
     case ejectionFailure(message: String)
 }
 
@@ -222,6 +230,9 @@ private enum BackupWorkflowError: LocalizedError {
     case selectedDestinationBackupRunning(String)
     case anotherBackupRunning(destinationKnown: Bool)
     case commandFailed(step: String, details: String)
+    case destinationQueryUnresponsive(String)
+    case timeMachineUnresponsive(String)
+    case diskAccessLost(String)
     case backupStillRunning(String)
     case ejectionFailed(name: String, details: String)
     case diskStillMounted(String)
@@ -249,6 +260,12 @@ private enum BackupWorkflowError: LocalizedError {
             return "Time Machine is already running a backup, but macOS did not identify its destination. Nothing was ejected; wait for it to finish and try again."
         case .commandFailed(let step, let details):
             return "\(step) failed. \(details)"
+        case .destinationQueryUnresponsive(let name):
+            return "macOS stopped responding while locating \(name). The app did not eject it. A disk can remain powered when its USB data connection or hub resets; wait for it to reappear before trying again."
+        case .timeMachineUnresponsive(let name):
+            return "macOS stopped responding while checking Time Machine for \(name). The disk was deliberately left connected and was not ejected. Keep it connected, then try the backup again."
+        case .diskAccessLost(let name):
+            return "macOS lost access to \(name) before the backup and safe ejection finished. Nothing was ejected. The disk may still have power if its USB data connection or hub reset."
         case .backupStillRunning(let name):
             return "Time Machine still reports that the backup is running, so \(name) was deliberately left connected."
         case .ejectionFailed(let name, let details):
@@ -430,11 +447,12 @@ final class BackupController {
     }
 
     private func performBackup() {
-        var backupCompleted = false
+        var failureStage = BackupFailureStage.beforeBackup
+        var originalMountPoint: String?
 
         do {
             let mountedDestination = try waitForMountedTarget()
-            let originalMountPoint = mountedDestination.mountPoint
+            originalMountPoint = mountedDestination.mountPoint
 
             emit(
                 .checking(
@@ -446,6 +464,7 @@ final class BackupController {
 
             emit(.backingUp("Preparing the Time Machine backup…"))
             cancellationGate.beginBackup()
+            failureStage = .duringBackup
             let backupResult = try runVerifiedBackup(
                 destinationID: mountedDestination.id
             )
@@ -461,7 +480,7 @@ final class BackupController {
                 )
             }
 
-            backupCompleted = true
+            failureStage = .afterBackup
             emitProgress(
                 TimeMachineBackupStatus(
                     isRunning: false,
@@ -507,14 +526,25 @@ final class BackupController {
         } catch BackupWorkflowError.cancelled {
             finishCancelled()
         } catch {
-            let message = (error as? LocalizedError)?.errorDescription
-                ?? error.localizedDescription
+            let message: String
+            if
+                failureStage != .afterBackup,
+                let originalMountPoint,
+                !fileExists(originalMountPoint)
+            {
+                message = BackupWorkflowError.diskAccessLost(
+                    settings.targetName
+                ).errorDescription ?? error.localizedDescription
+            } else {
+                message = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+            }
 
             finish(
                 state: .failure(message),
                 completion: .failure(
                     message: message,
-                    backupCompleted: backupCompleted
+                    stage: failureStage
                 )
             )
         }
@@ -639,7 +669,7 @@ final class BackupController {
                 return destination
             }
 
-            sleep(2)
+            sleep(5)
         }
 
         throw BackupWorkflowError.timedOutWaitingForDisk(
@@ -674,6 +704,7 @@ final class BackupController {
             group.leave()
         }
 
+        var nextProgressCheck = 0.0
         while group.wait(timeout: .now() + 1) == .timedOut {
             if cancellationGate.shouldIssueStopCommand() {
                 _ = try? runner.run(
@@ -682,7 +713,11 @@ final class BackupController {
                     timeout: settings.quickCommandTimeout
                 )
             }
-            reportCurrentBackupProgress()
+            let now = ProcessInfo.processInfo.systemUptime
+            if now >= nextProgressCheck {
+                reportCurrentBackupProgress()
+                nextProgressCheck = now + 5
+            }
         }
 
         try checkCancellation()
@@ -722,18 +757,13 @@ final class BackupController {
 
     private func reportCurrentBackupProgress() {
         guard
-            let result = try? runner.run(
-                settings.tmutilPath,
-                arguments: ["status"],
-                timeout: settings.quickCommandTimeout
+            let status = try? currentTimeMachineStatus(
+                retryOnTimeout: false
             ),
-            result.exitCode == 0
+            status.isRunning
         else {
             return
         }
-
-        let status = TimeMachineStatusParser.parse(result.standardOutput)
-        guard status.isRunning else { return }
 
         emitProgress(status)
         emit(.backingUp(stageMessage(for: status.phase)))
@@ -782,11 +812,42 @@ final class BackupController {
     }
 
     private func configuredDestinations() throws -> [TimeMachineDestination] {
-        let result = try runner.run(
-            settings.tmutilPath,
-            arguments: ["destinationinfo", "-X"],
-            timeout: settings.quickCommandTimeout
-        )
+        var finalResult: CommandResult?
+
+        for attempt in 0..<2 {
+            do {
+                finalResult = try runner.run(
+                    settings.tmutilPath,
+                    arguments: ["destinationinfo", "-X"],
+                    timeout: settings.destinationInfoCommandTimeout
+                )
+                break
+            } catch let error as CommandRunnerError {
+                guard case .timedOut = error else {
+                    throw error
+                }
+
+                guard attempt == 0 else {
+                    throw BackupWorkflowError.destinationQueryUnresponsive(
+                        settings.targetName
+                    )
+                }
+
+                emit(
+                    .waiting(
+                        "macOS briefly lost contact with \(settings.targetName) — retrying safely…"
+                    )
+                )
+                try checkCancellation()
+                sleep(1)
+            }
+        }
+
+        guard let result = finalResult else {
+            throw BackupWorkflowError.destinationQueryUnresponsive(
+                settings.targetName
+            )
+        }
 
         guard result.exitCode == 0 else {
             throw BackupWorkflowError.destinationLookupFailed(
@@ -887,24 +948,56 @@ final class BackupController {
         )
     }
 
-    private func currentTimeMachineStatus() throws -> TimeMachineBackupStatus {
-        let result = try runner.run(
-            settings.tmutilPath,
-            arguments: ["status"],
-            timeout: settings.quickCommandTimeout
-        )
+    private func currentTimeMachineStatus(
+        retryOnTimeout: Bool = true
+    ) throws -> TimeMachineBackupStatus {
+        let attemptCount = retryOnTimeout ? 2 : 1
 
-        guard result.exitCode == 0 else {
-            throw BackupWorkflowError.commandFailed(
-                step: "The Time Machine status check",
-                details: usefulDetails(
-                    result.output,
-                    fallback: "Time Machine returned error \(result.exitCode)."
+        for attempt in 0..<attemptCount {
+            do {
+                let result = try runner.run(
+                    settings.tmutilPath,
+                    arguments: ["status"],
+                    timeout: settings.statusCommandTimeout
                 )
-            )
+
+                guard result.exitCode == 0 else {
+                    throw BackupWorkflowError.commandFailed(
+                        step: "The Time Machine status check",
+                        details: usefulDetails(
+                            result.output,
+                            fallback: "Time Machine returned error \(result.exitCode)."
+                        )
+                    )
+                }
+
+                return TimeMachineStatusParser.parse(
+                    result.standardOutput
+                )
+            } catch let error as CommandRunnerError {
+                guard case .timedOut = error else {
+                    throw error
+                }
+
+                guard attempt + 1 < attemptCount else {
+                    throw BackupWorkflowError.timeMachineUnresponsive(
+                        settings.targetName
+                    )
+                }
+
+                emit(
+                    .checking(
+                        "Time Machine is slow to respond — retrying safely…"
+                    )
+                )
+                try checkCancellation()
+                sleep(1)
+            }
         }
 
-        return TimeMachineStatusParser.parse(result.standardOutput)
+        throw BackupWorkflowError.timeMachineUnresponsive(
+            settings.targetName
+        )
     }
 
     private func waitUntilTargetIsUnmounted() throws {

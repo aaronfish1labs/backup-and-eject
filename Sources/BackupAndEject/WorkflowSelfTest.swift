@@ -220,6 +220,8 @@ func runWorkflowSelfTest() -> Int32 {
         waitForUnmountTimeout: 1,
         waitForIdleTimeout: 1,
         quickCommandTimeout: 1,
+        destinationInfoCommandTimeout: 1,
+        statusCommandTimeout: 1,
         tmutilPath: "/test/tmutil",
         diskutilPath: "/test/diskutil"
     )
@@ -314,8 +316,8 @@ private func verifyBackupFailureDoesNotEject(
         mountPoint: mountPoint
     )
 
-    guard case .failure(_, let backupCompleted)? = result.completion,
-          !backupCompleted else {
+    guard case .failure(_, let stage)? = result.completion,
+          stage == .duringBackup else {
         return workflowFailure(
             "a failed backup was not reported as incomplete"
         )
@@ -340,8 +342,8 @@ private func verifyEjectFailureIsReported(
         mountPoint: mountPoint
     )
 
-    guard case .failure(_, let backupCompleted)? = result.completion,
-          backupCompleted else {
+    guard case .failure(_, let stage)? = result.completion,
+          stage == .afterBackup else {
         return workflowFailure(
             "an eject failure did not preserve the successful backup result"
         )
