@@ -17,6 +17,7 @@ final class AppDelegate: NSObject {
         "Choose a backup disk"
     )
     private var currentProgress: TimeMachineBackupStatus?
+    private var statusRevision = UUID()
     private var pendingTermination = false
 
     private var statusItem: NSStatusItem!
@@ -345,6 +346,7 @@ private extension AppDelegate {
     }
 
     func apply(_ state: BackupState) {
+        statusRevision = UUID()
         currentState = state
         statusMenuItem.title = state.message
 
@@ -827,6 +829,7 @@ private extension AppDelegate {
         body: String,
         fallbackToAlert: Bool = true
     ) {
+        let statusRevision = self.statusRevision
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -846,7 +849,8 @@ private extension AppDelegate {
                     if error != nil, fallbackToAlert {
                         self?.showNotificationFallback(
                             title: title,
-                            body: body
+                            body: body,
+                            statusRevision: statusRevision
                         )
                     }
                 }
@@ -859,7 +863,8 @@ private extension AppDelegate {
                     } else if fallbackToAlert {
                         self?.showNotificationFallback(
                             title: title,
-                            body: body
+                            body: body,
+                            statusRevision: statusRevision
                         )
                     }
                 }
@@ -867,27 +872,42 @@ private extension AppDelegate {
                 if fallbackToAlert {
                     self?.showNotificationFallback(
                         title: title,
-                        body: body
+                        body: body,
+                        statusRevision: statusRevision
                     )
                 }
             @unknown default:
                 if fallbackToAlert {
                     self?.showNotificationFallback(
                         title: title,
-                        body: body
+                        body: body,
+                        statusRevision: statusRevision
                     )
                 }
             }
         }
     }
 
-    func showNotificationFallback(title: String, body: String) {
+    func showNotificationFallback(
+        title: String,
+        body: String,
+        statusRevision: UUID
+    ) {
         DispatchQueue.main.async { [weak self] in
-            self?.showAlert(title: title, message: body)
+            guard let self else { return }
+            let response = self.showAlert(title: title, message: body)
+            // A delayed acknowledgement must not hide a newer operation.
+            guard
+                response == .alertFirstButtonReturn,
+                self.statusRevision == statusRevision,
+                case .success = self.currentState
+            else { return }
+            self.statusPanelController.hide()
         }
     }
 
-    func showAlert(title: String, message: String) {
+    @discardableResult
+    func showAlert(title: String, message: String) -> NSApplication.ModalResponse {
         NSApp.activate(ignoringOtherApps: true)
 
         let alert = NSAlert()
@@ -895,6 +915,6 @@ private extension AppDelegate {
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: "OK")
-        alert.runModal()
+        return alert.runModal()
     }
 }

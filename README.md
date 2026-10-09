@@ -63,6 +63,11 @@ recommended.
 6. Follow the small status panel.
 7. Wait for the notification confirming that the disk is safe to switch off.
 
+If macOS notifications are unavailable, the app shows a confirmation with an
+**OK** button. Pressing **OK** also closes the small status panel, so there is
+only one window to dismiss. The panel stays visible until you acknowledge the
+confirmation, and can be reopened with **Show Backup Status**.
+
 Choose **Cancel Current Operation** if you need to stop before ejection starts.
 If a backup is active, cancellation may take a moment while Time Machine stops.
 The disk stays connected.
