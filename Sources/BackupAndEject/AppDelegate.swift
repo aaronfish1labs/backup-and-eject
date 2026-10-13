@@ -12,6 +12,10 @@ final class AppDelegate: NSObject {
     )
     private let destinationProvider = TimeMachineDestinationProvider()
 
+    private let storageDiskService = StorageDiskService()
+    private lazy var storagePreferences = StorageDiskPreferences(defaults: defaults)
+    private var selectedStorageDisk: StorageDiskSelection?
+    private var storageOperationInProgress = false
     private var selectedDestination: DestinationSelection?
     private var currentState = BackupState.idle(
         "Choose a backup disk"
@@ -24,6 +28,8 @@ final class AppDelegate: NSObject {
     private var statusMenuItem: NSMenuItem!
     private var backupMenuItem: NSMenuItem!
     private var ejectMenuItem: NSMenuItem!
+    private var storageEjectMenuItem: NSMenuItem!
+    private var chooseStorageMenuItem: NSMenuItem!
     private var cancelMenuItem: NSMenuItem!
     private var testMenuItem: NSMenuItem!
     private var showStatusMenuItem: NSMenuItem!
@@ -40,6 +46,38 @@ final class AppDelegate: NSObject {
     }
 }
 
+extension AppDelegate {
+    /// Exercises actual menu wiring without issuing any disk or backup commands.
+    func runMenuSelfTest() -> Int32 {
+        selectedStorageDisk = storagePreferences.load() ?? StorageDiskSelection(
+            id: "11111111-2222-3333-4444-555555555555", name: "Test Storage Disk"
+        )
+        configureMenuBar()
+        apply(.idle("Menu test"))
+        guard storageEjectMenuItem.title == "Eject \(selectedStorageDisk!.name)",
+              storageEjectMenuItem.isEnabled,
+              storageEjectMenuItem.action == #selector(ejectStorageDisk),
+              chooseStorageMenuItem.isEnabled,
+              chooseStorageMenuItem.action == #selector(chooseStorageDisk)
+        else { return 1 }
+        storageOperationInProgress = true
+        apply(.ejecting("Menu test"))
+        guard !storageEjectMenuItem.isEnabled, !chooseStorageMenuItem.isEnabled,
+              !backupMenuItem.isEnabled, !ejectMenuItem.isEnabled,
+              !quitMenuItem.isEnabled, cancelMenuItem.isHidden
+        else { return 1 }
+        storageOperationInProgress = false
+        install(DestinationSelection(id: "TEST-BACKUP-ID", name: "Test Backup Disk"))
+        guard storageEjectMenuItem.isEnabled, backupMenuItem.isEnabled,
+              ejectMenuItem.isEnabled,
+              backupMenuItem.title == "Back Up to Test Backup Disk & Eject",
+              ejectMenuItem.title == "Eject Test Backup Disk"
+        else { return 1 }
+        print("MENU SELF-TEST PASSED: \(storageEjectMenuItem.title); storage actions and operation locks are correct; backup actions are preserved")
+        return 0
+    }
+}
+
 extension AppDelegate: NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -48,6 +86,7 @@ extension AppDelegate: NSApplicationDelegate {
         )
         UNUserNotificationCenter.current().delegate = self
 
+        selectedStorageDisk = storagePreferences.load()
         configureMenuBar()
 
         if let selection = destinationPreferences.load() {
@@ -69,7 +108,7 @@ extension AppDelegate: NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(
                 deadline: .now() + 0.4
             ) { [weak self] in
-                self?.controller?.startSimulation()
+                self?.runSafetyTest()
             }
         }
     }
@@ -77,6 +116,13 @@ extension AppDelegate: NSApplicationDelegate {
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
+        if storageOperationInProgress {
+            showAlert(
+                title: "Storage disk ejection is in progress",
+                message: "Wait for macOS to finish before quitting."
+            )
+            return .terminateCancel
+        }
         guard controller?.isBusy == true else {
             return .terminateNow
         }
@@ -211,6 +257,27 @@ private extension AppDelegate {
             accessibilityDescription: "Eject backup disk"
         )
         menu.addItem(ejectMenuItem)
+
+        menu.addItem(.separator())
+        storageEjectMenuItem = NSMenuItem(
+            title: "Eject Storage Disk",
+            action: #selector(ejectStorageDisk),
+            keyEquivalent: ""
+        )
+        storageEjectMenuItem.target = self
+        storageEjectMenuItem.image = NSImage(
+            systemSymbolName: "eject",
+            accessibilityDescription: "Eject storage disk"
+        )
+        menu.addItem(storageEjectMenuItem)
+        chooseStorageMenuItem = NSMenuItem(
+            title: "Choose Storage Disk…",
+            action: #selector(chooseStorageDisk),
+            keyEquivalent: ""
+        )
+        chooseStorageMenuItem.target = self
+        menu.addItem(chooseStorageMenuItem)
+        updateStorageMenuTitle()
 
         cancelMenuItem = NSMenuItem(
             title: "Cancel Current Operation",
@@ -351,17 +418,19 @@ private extension AppDelegate {
         statusMenuItem.title = state.message
 
         let isConfigured = selectedDestination != nil
-        let isAvailable = !state.isBusy
+        let isAvailable = !state.isBusy && !storageOperationInProgress
         backupMenuItem.isEnabled = isConfigured && isAvailable
         ejectMenuItem.isEnabled = isConfigured && isAvailable
+        storageEjectMenuItem.isEnabled = selectedStorageDisk != nil && isAvailable
+        chooseStorageMenuItem.isEnabled = isAvailable
         testMenuItem.isEnabled = isConfigured && isAvailable
         chooseDiskMenuItem.isEnabled = isAvailable
         safetyMenuItem.isEnabled = isAvailable
         launchAtLoginMenuItem.isEnabled = isAvailable
-        cancelMenuItem.isHidden = !state.isBusy
+        cancelMenuItem.isHidden = !state.isBusy || storageOperationInProgress
         cancelMenuItem.isEnabled =
-            state.isCancellable && controller?.canCancel == true
-        quitMenuItem.isEnabled = isAvailable || state.isCancellable
+            !storageOperationInProgress && state.isCancellable && controller?.canCancel == true
+        quitMenuItem.isEnabled = !storageOperationInProgress && (isAvailable || state.isCancellable)
 
         setStatusIcon(
             symbolName: state.symbolName,
@@ -460,6 +529,7 @@ private extension AppDelegate {
     @objc func startBackup() {
         guard
             let controller,
+            !storageOperationInProgress,
             !controller.isBusy
         else {
             return
@@ -490,6 +560,7 @@ private extension AppDelegate {
             }
         }
 
+        statusPanelController.setTargetName(selectedDestination?.name)
         requestNotificationPermission()
         controller.startBackup()
     }
@@ -497,13 +568,89 @@ private extension AppDelegate {
     @objc func ejectDisk() {
         guard
             let controller,
+            !storageOperationInProgress,
             !controller.isBusy
         else {
             return
         }
 
+        statusPanelController.setTargetName(selectedDestination?.name)
         requestNotificationPermission()
         controller.startEjectOnly()
+    }
+
+    func updateStorageMenuTitle() {
+        storageEjectMenuItem.title = selectedStorageDisk.map { "Eject \($0.name)" }
+            ?? "Eject Storage Disk"
+    }
+
+    @objc func chooseStorageDisk() {
+        guard !currentState.isBusy, !storageOperationInProgress else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose Storage Disk"
+        panel.message = "Select the external storage disk itself under Volumes. The app remembers its exact identity."
+        panel.prompt = "Choose Disk"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Volumes", isDirectory: true)
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        storageOperationInProgress = true
+        currentProgress = nil
+        statusPanelController.setTargetName(url.lastPathComponent)
+        apply(.checking("Checking the selected storage disk…"))
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let result = Result { try self.storageDiskService.selection(atPath: url.path) }
+            DispatchQueue.main.async {
+                self.storageOperationInProgress = false
+                switch result {
+                case .success(let selection):
+                    self.selectedStorageDisk = selection
+                    self.storagePreferences.save(selection)
+                    self.updateStorageMenuTitle()
+                    self.apply(.idle("Ready to eject \(selection.name)"))
+                case .failure(let error):
+                    self.apply(.failure(error.localizedDescription))
+                    self.showAlert(title: "Could not select storage disk", message: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    @objc func ejectStorageDisk() {
+        guard !currentState.isBusy, !storageOperationInProgress,
+              let selection = selectedStorageDisk else { return }
+        storageOperationInProgress = true
+        currentProgress = nil
+        statusPanelController.setTargetName(selection.name)
+        apply(.ejecting("Safely ejecting \(selection.name)…"))
+        statusPanelController.show()
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .suddenTerminationDisabled, .automaticTerminationDisabled],
+            reason: "Safely ejecting an external storage disk"
+        )
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let result = Result { try self.storageDiskService.eject(selection) }
+            DispatchQueue.main.async {
+                ProcessInfo.processInfo.endActivity(activity)
+                self.storageOperationInProgress = false
+                switch result {
+                case .success:
+                    self.apply(.success("\(selection.name) is safe to switch off"))
+                    self.sendNotification(
+                        identifier: "storage-ejection-\(UUID().uuidString)",
+                        title: "\(selection.name) is safe to switch off",
+                        body: "The storage disk was safely ejected."
+                    )
+                case .failure(let error):
+                    self.apply(.failure(error.localizedDescription))
+                    self.showAlert(title: "\(selection.name) could not be ejected", message: error.localizedDescription)
+                }
+            }
+        }
     }
 
     @objc func cancelCurrentOperation() {
@@ -513,11 +660,13 @@ private extension AppDelegate {
     @objc func runSafetyTest() {
         guard
             let controller,
+            !storageOperationInProgress,
             !controller.isBusy
         else {
             return
         }
 
+        statusPanelController.setTargetName(selectedDestination?.name)
         requestNotificationPermission()
         controller.startSimulation()
     }
@@ -531,7 +680,7 @@ private extension AppDelegate {
     }
 
     @objc func chooseBackupDisk() {
-        guard controller?.isBusy != true else { return }
+        guard controller?.isBusy != true, !storageOperationInProgress else { return }
         loadDestinationsAndPresentPicker()
     }
 

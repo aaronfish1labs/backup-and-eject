@@ -95,7 +95,7 @@ final class BackupStatusPanelController: NSWindowController {
         case .checking:
             setIndeterminateProgress()
             detailLabel.stringValue = """
-            Checking Time Machine and the selected destination.
+            Checking the selected disk before continuing.
             """
             show()
         case .backingUp:
@@ -131,7 +131,7 @@ final class BackupStatusPanelController: NSWindowController {
             show()
         case .failure:
             setStoppedProgress()
-            stageLabel.stringValue = "Backup needs attention"
+            stageLabel.stringValue = "Disk operation needs attention"
             detailLabel.stringValue = firstSentence(of: state.message)
             show()
         }
