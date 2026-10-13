@@ -153,15 +153,38 @@ final class StorageDiskServiceTests: XCTestCase {
         XCTAssertNoThrow(try StorageDiskService(runner: runner).eject(selection()))
     }
 
+    func testAcceptsMacOSUnmountedAPFSResultWithoutMountedFlag() throws {
+        // diskutil info -plist reports an empty MountPoint without a Mounted
+        // key for an ejected APFS volume that remains visible to diskutil.
+        for mountPointValue in [nil, ""] as [String?] {
+            var unmounted = volume()
+            unmounted.removeValue(forKey: "Mounted")
+            unmounted["MountPoint"] = mountPointValue
+            let runner = try ejectRunner(after: plist(unmounted))
+
+            XCTAssertNoThrow(try StorageDiskService(runner: runner).eject(selection()))
+            XCTAssertEqual(runner.calls.map(\.arguments.first), ["info", "eject", "info"])
+        }
+    }
+
     func testRefusesMountedOrAmbiguousPostEjectInformation() throws {
         var unmountedWithPath = volume()
         unmountedWithPath["Mounted"] = false
-        var missingMountedFlag = volume()
-        missingMountedFlag.removeValue(forKey: "MountPoint")
-        missingMountedFlag.removeValue(forKey: "Mounted")
+        var mountedWithoutPath = volume()
+        mountedWithoutPath.removeValue(forKey: "MountPoint")
+        var missingMountedFlagWithPath = volume()
+        missingMountedFlagWithPath.removeValue(forKey: "Mounted")
+        var invalidMountedFlag = volume()
+        invalidMountedFlag.removeValue(forKey: "MountPoint")
+        invalidMountedFlag["Mounted"] = "false"
+        var malformedMountPoint = volume()
+        malformedMountPoint.removeValue(forKey: "Mounted")
+        malformedMountPoint["MountPoint"] = false
         var differentVolume = volume()
         differentVolume["VolumeUUID"] = otherID
-        for info in [volume(), unmountedWithPath, missingMountedFlag, differentVolume] {
+        for info in [volume(), unmountedWithPath, mountedWithoutPath,
+                     missingMountedFlagWithPath, invalidMountedFlag,
+                     malformedMountPoint, differentVolume] {
             let runner = try ejectRunner(after: plist(info))
             XCTAssertThrowsError(try StorageDiskService(runner: runner).eject(selection()))
             XCTAssertEqual(runner.calls.count, 3)
