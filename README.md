@@ -15,9 +15,10 @@ to switch off.
 - Shows a first-run screen listing your configured local Time Machine disks.
 - Remembers the exact Time Machine destination identity, not just its name.
 - Offers **Back Up to [disk] & Eject** and a separate **Eject [disk]** command.
+- Can remember a separate external storage disk and eject it without starting a backup.
 - Displays the current stage and any progress reported by macOS in a compact
   panel at the bottom-right of the desktop.
-- Waits for Time Machine to become idle before asking macOS to eject the disk.
+- Waits for Time Machine to become idle before asking macOS to eject the backup disk.
 - If an automatic backup is already running to the selected disk, waits for it
   to finish and then runs one verified final backup before ejection.
 - Offers **Cancel Current Operation** before ejection begins. Cancelling an
@@ -31,8 +32,9 @@ to switch off.
 
 - macOS 14 Sonoma or later.
 - Apple silicon or Intel Mac.
-- A directly attached external disk already configured in
-  **System Settings → General → Time Machine**.
+- For backup operations, a directly attached external disk already configured
+  in **System Settings → General → Time Machine**.
+- For storage-only ejection, a mounted external storage volume.
 - Xcode Command Line Tools only if building from source.
 
 Network Time Machine destinations are not supported because the app is
@@ -76,6 +78,14 @@ If you only need to disconnect the disk, choose **Eject [disk]**. The app first
 checks that Time Machine is idle and then performs a normal macOS eject.
 
 You can change the selected disk later with **Choose Backup Disk…**.
+
+For an ordinary external storage disk, use **Choose Storage Disk…** and select
+its volume root under `/Volumes`. A separate **Eject [storage disk]** menu item
+then uses its saved volume UUID, even if the disk is renamed. It does not start
+a backup or change your selected backup disk. Internal disks and APFS system
+or backup volumes are refused. If the disk is absent or busy, the app explains
+why it could not eject it. Normal macOS ejection may affect every volume on the
+same physical device, so choose a dedicated storage device.
 
 ## Safety model
 
@@ -123,7 +133,8 @@ Privacy & Security instructions in the Install section.
 
 The app does not send data anywhere. Its only saved settings are the selected
 destination name and ID, the AI-app warning preference, launch-at-login state,
-and the date of the last successful backup for each selected disk.
+the chosen storage volume name and UUID, and the date of the last successful
+backup for each selected disk.
 
 ## Support
 

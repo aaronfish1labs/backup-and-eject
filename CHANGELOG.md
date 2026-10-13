@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0
+
+- Adds a separate eject option for a remembered external storage disk.
+- Checks the exact volume UUID and uses normal macOS ejection without starting
+  a backup or changing the selected backup destination.
+- Refuses internal, unavailable, mismatched and APFS system or backup volumes;
+  reports busy disks and unsuccessful ejection without force.
+
 ## 1.1.2
 
 - Stops timed-out system-command output collection at a firm deadline instead

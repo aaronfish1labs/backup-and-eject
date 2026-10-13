@@ -100,7 +100,26 @@ if CommandLine.arguments.contains("--refresh-login-item") {
     }
 }
 
+if let index = CommandLine.arguments.firstIndex(of: "--configure-storage-disk") {
+    guard CommandLine.arguments.count == index + 2 else {
+        fputs("Provide the exact mounted storage volume path.\n", stderr)
+        exit(1)
+    }
+    do {
+        let selection = try StorageDiskService().selection(atPath: CommandLine.arguments[index + 1])
+        StorageDiskPreferences().save(selection)
+        print("Storage disk configured: \(selection.name)")
+        exit(0)
+    } catch {
+        fputs("STORAGE DISK CONFIGURATION FAILED: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
 let application = NSApplication.shared
 let appDelegate = AppDelegate()
+if CommandLine.arguments.contains("--menu-self-test") {
+    exit(appDelegate.runMenuSelfTest())
+}
 application.delegate = appDelegate
 application.run()
