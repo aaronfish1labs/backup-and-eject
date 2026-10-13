@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1
+
+- Corrects a false eject-failure warning for APFS storage volumes when macOS
+  returns an empty mount point without a `Mounted` field after successful
+  ejection. Exact identity, malformed-response and mounted-volume checks remain.
+
 ## 1.2.0
 
 - Adds a separate eject option for a remembered external storage disk.

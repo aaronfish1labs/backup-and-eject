@@ -115,7 +115,9 @@ final class StorageDiskService {
             let remainingSelection = try self.selection(from: remaining)
             try validateExternalStorage(remaining)
             guard UUID(uuidString: remainingSelection.id) == expectedID,
-                  Self.boolean(remaining["Mounted"]) == false,
+                  // diskutil's APFS plist can omit Mounted after ejection.
+                  // A present flag must still explicitly say false.
+                  remaining["Mounted"] == nil || Self.boolean(remaining["Mounted"]) == false,
                   remaining["MountPoint"] == nil
                     || (remaining["MountPoint"] as? String) == ""
             else {
