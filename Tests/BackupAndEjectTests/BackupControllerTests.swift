@@ -77,6 +77,42 @@ final class BackupControllerTests: XCTestCase {
         XCTAssertEqual(harness.runner.ejectCount, 0)
     }
 
+    func testRetriesUnreadableDestinationListAndCompletesBackup() {
+        let harness = WorkflowHarness(unreadableDestinationQueries: [1])
+
+        guard case .success? = harness.runBackup() else {
+            return XCTFail("Expected a fresh destination query to recover")
+        }
+        XCTAssertEqual(harness.runner.destinationInfoCount, 4)
+        XCTAssertEqual(harness.runner.startBackupCount, 1)
+        XCTAssertEqual(harness.runner.ejectCount, 1)
+    }
+
+    func testStopsBeforeBackupWhenDestinationListRemainsUnreadable() {
+        let harness = WorkflowHarness(unreadableDestinationQueries: [1, 2])
+
+        guard case .failure(let message, let stage)? = harness.runBackup() else {
+            return XCTFail("Expected a safe destination-query failure")
+        }
+        XCTAssertEqual(stage, .beforeBackup)
+        XCTAssertTrue(message.contains("macOS returned an incomplete or invalid response"))
+        XCTAssertEqual(harness.runner.destinationInfoCount, 2)
+        XCTAssertEqual(harness.runner.startBackupCount, 0)
+        XCTAssertEqual(harness.runner.ejectCount, 0)
+    }
+
+    func testLeavesDiskConnectedWhenPostBackupDestinationListRemainsUnreadable() {
+        let harness = WorkflowHarness(unreadableDestinationQueries: [2, 3])
+
+        guard case .failure(_, let stage)? = harness.runBackup() else {
+            return XCTFail("Expected a safe post-backup destination-query failure")
+        }
+        XCTAssertEqual(stage, .afterBackup)
+        XCTAssertEqual(harness.runner.destinationInfoCount, 3)
+        XCTAssertEqual(harness.runner.startBackupCount, 1)
+        XCTAssertEqual(harness.runner.ejectCount, 0)
+    }
+
     func testPersistentStatusTimeoutLeavesDiskConnected() {
         let harness = WorkflowHarness(statusTimeoutsRemaining: 2)
 
@@ -306,6 +342,7 @@ private final class TestCommandRunner: CommandRunning {
     private let stopSemaphore = DispatchSemaphore(value: 0)
 
     private var destinationInfoTimeoutsRemaining: Int
+    private let unreadableDestinationQueries: Set<Int>
     private var statusTimeoutsRemaining: Int
     private var recordedDestinationInfoCount = 0
     private var recordedStatusCount = 0
@@ -363,6 +400,7 @@ private final class TestCommandRunner: CommandRunning {
         failFirstStartWithSameDestinationBackup: Bool,
         remainRunningAfterBackup: Bool,
         destinationInfoTimeoutsRemaining: Int,
+        unreadableDestinationQueries: Set<Int>,
         statusTimeoutsRemaining: Int,
         disconnectWhenStatusTimesOut: Bool
     ) {
@@ -377,6 +415,7 @@ private final class TestCommandRunner: CommandRunning {
         self.remainRunningAfterBackup = remainRunningAfterBackup
         self.destinationInfoTimeoutsRemaining =
             destinationInfoTimeoutsRemaining
+        self.unreadableDestinationQueries = unreadableDestinationQueries
         self.statusTimeoutsRemaining = statusTimeoutsRemaining
         self.disconnectWhenStatusTimesOut =
             disconnectWhenStatusTimesOut
@@ -397,6 +436,9 @@ private final class TestCommandRunner: CommandRunning {
         case "destinationinfo":
             lock.lock()
             recordedDestinationInfoCount += 1
+            let unreadable = unreadableDestinationQueries.contains(
+                recordedDestinationInfoCount
+            )
             let shouldTimeOut = destinationInfoTimeoutsRemaining > 0
             if shouldTimeOut {
                 destinationInfoTimeoutsRemaining -= 1
@@ -409,10 +451,8 @@ private final class TestCommandRunner: CommandRunning {
                     timeout: timeout ?? 0
                 )
             }
-            return CommandResult(
-                exitCode: 0,
-                output: try destinationInfo()
-            )
+            let output = unreadable ? "<?xml version=\"1.0\"?><plist" : try destinationInfo()
+            return CommandResult(exitCode: 0, output: output)
         case "status":
             lock.lock()
             recordedStatusCount += 1
@@ -582,6 +622,7 @@ private final class WorkflowHarness {
         failFirstStartWithSameDestinationBackup: Bool = false,
         remainRunningAfterBackup: Bool = false,
         destinationInfoTimeoutsRemaining: Int = 0,
+        unreadableDestinationQueries: Set<Int> = [],
         statusTimeoutsRemaining: Int = 0,
         disconnectWhenStatusTimesOut: Bool = false
     ) {
@@ -597,6 +638,7 @@ private final class WorkflowHarness {
             remainRunningAfterBackup: remainRunningAfterBackup,
             destinationInfoTimeoutsRemaining:
                 destinationInfoTimeoutsRemaining,
+            unreadableDestinationQueries: unreadableDestinationQueries,
             statusTimeoutsRemaining: statusTimeoutsRemaining,
             disconnectWhenStatusTimesOut:
                 disconnectWhenStatusTimesOut

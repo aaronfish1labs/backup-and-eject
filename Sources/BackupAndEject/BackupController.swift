@@ -812,22 +812,27 @@ final class BackupController {
     }
 
     private func configuredDestinations() throws -> [TimeMachineDestination] {
-        var finalResult: CommandResult?
+        var retryAvailable = true
 
-        for attempt in 0..<2 {
+        while true {
             do {
-                finalResult = try runner.run(
+                let result = try runner.run(
                     settings.tmutilPath,
                     arguments: ["destinationinfo", "-X"],
                     timeout: settings.destinationInfoCommandTimeout
                 )
-                break
-            } catch let error as CommandRunnerError {
-                guard case .timedOut = error else {
-                    throw error
+                guard result.exitCode == 0 else {
+                    throw BackupWorkflowError.destinationLookupFailed(
+                        usefulDetails(
+                            result.output,
+                            fallback: "Time Machine returned error \(result.exitCode)."
+                        )
+                    )
                 }
 
-                guard attempt == 0 else {
+                return try TimeMachineDestinationParser.parse(result.standardOutput)
+            } catch CommandRunnerError.timedOut {
+                guard retryAvailable else {
                     throw BackupWorkflowError.destinationQueryUnresponsive(
                         settings.targetName
                     )
@@ -838,34 +843,17 @@ final class BackupController {
                         "macOS briefly lost contact with \(settings.targetName) — retrying safely…"
                     )
                 )
-                try checkCancellation()
-                sleep(1)
-            }
-        }
-
-        guard let result = finalResult else {
-            throw BackupWorkflowError.destinationQueryUnresponsive(
-                settings.targetName
-            )
-        }
-
-        guard result.exitCode == 0 else {
-            throw BackupWorkflowError.destinationLookupFailed(
-                usefulDetails(
-                    result.output,
-                    fallback: "Time Machine returned error \(result.exitCode)."
+            } catch DestinationParserError.invalidPropertyList where retryAvailable {
+                // Retry the read-only lookup if the response could not be decoded.
+            } catch let error as DestinationParserError {
+                throw BackupWorkflowError.destinationLookupFailed(
+                    error.localizedDescription
                 )
-            )
-        }
+            }
 
-        do {
-            return try TimeMachineDestinationParser.parse(
-                result.standardOutput
-            )
-        } catch {
-            throw BackupWorkflowError.destinationLookupFailed(
-                error.localizedDescription
-            )
+            retryAvailable = false
+            try checkCancellation()
+            sleep(1)
         }
     }
 
