@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.2
+
+- Retries the read-only Time Machine destination check once if macOS returns
+  unreadable data. If the check still fails, the app reports that it could
+  not verify the destination.
+
 ## 1.2.1
 
 - Corrects a false eject-failure warning for APFS storage volumes when macOS

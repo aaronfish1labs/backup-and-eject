@@ -24,11 +24,14 @@ public struct TimeMachineDestination: Equatable {
 }
 
 public enum DestinationParserError: LocalizedError {
+    case invalidPropertyList
     case invalidTopLevel
     case missingDestinations
 
     public var errorDescription: String? {
         switch self {
+        case .invalidPropertyList:
+            return "macOS returned an incomplete or invalid response."
         case .invalidTopLevel:
             return "Time Machine returned an unreadable destination list."
         case .missingDestinations:
@@ -39,11 +42,16 @@ public enum DestinationParserError: LocalizedError {
 
 public enum TimeMachineDestinationParser {
     public static func parse(_ data: Data) throws -> [TimeMachineDestination] {
-        let propertyList = try PropertyListSerialization.propertyList(
-            from: data,
-            options: [],
-            format: nil
-        )
+        let propertyList: Any
+        do {
+            propertyList = try PropertyListSerialization.propertyList(
+                from: data,
+                options: [],
+                format: nil
+            )
+        } catch {
+            throw DestinationParserError.invalidPropertyList
+        }
 
         guard let dictionary = propertyList as? [String: Any] else {
             throw DestinationParserError.invalidTopLevel
